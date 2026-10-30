@@ -122,7 +122,7 @@ EOF
 # The stand-in bandit: writes a fixture report from tests/fixtures/bandit to
 # --output, the --ignore-nosec run's from STUB_BANDIT_ALL, and exits 1 when
 # it has results. Settings:
-#   STUB_BANDIT_REPORT  the report (default clean.json)
+#   STUB_BANDIT_REPORT  the report (default clean.json), or an absolute path
 #   STUB_BANDIT_ALL     the --ignore-nosec run's report (default all.json)
 #   STUB_BANDIT_EXIT    exit with this code after a traceback, the report empty
 #   STUB_BANDIT_LOG     a line to log on stderr
@@ -135,6 +135,7 @@ if [[ "$1" == --version ]]; then
 fi
 args=("$@")
 report="${STUB_FIXTURES}/bandit/${STUB_BANDIT_REPORT:-clean.json}"
+[[ "${STUB_BANDIT_REPORT:-}" == /* ]] && report=${STUB_BANDIT_REPORT}
 pass=""
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[i]}" in
@@ -674,6 +675,11 @@ for refused in -tB101 -bbase.json -x./src --base=base.json --exit "-qr ."; do
 done
 run bandit "extra_args=-n5 -qa vuln --num 3" -- STUB_BANDIT_REPORT=findings.json
 check "-n with its value attached, -a after -q, and an abbreviated --number pass" args_have bandit -n5 -qa vuln --num 3
+jq '.results = [range(3000) as $i | .results[0] + {line_number: ($i + 1)}]' "${FIXTURES}/bandit/findings.json" > "${WORK}/many.json"
+run bandit report_only=true run_record=true -- STUB_BANDIT_REPORT="${WORK}/many.json"
+check "thousands of findings are listed in part, without a broken pipe ending the step" rc_is 0
+check "saying how many more the reports hold" said "  ... and 2950 more, in the reports."
+check "and the run record is written" report bandit.run-record.json
 run bandit targets=missing
 check "a target that doesn't exist is refused" said "targets names 'missing', which doesn't exist"
 run bandit config=missing.yaml
@@ -854,7 +860,7 @@ run lock_verify requirements=requirements.txt
 check "a loose requirements file fails the step" rc_is 1
 check "a requirement without a pin" said "  requirements.txt:5: unpinned: requests is not pinned to one version (>=2.19)"
 check "a pin without a hash" said "  requirements.txt:6: unhashed: six 1.17.0 has no hash"
-check "a weak hash" said "  requirements.txt:7: weak-hash: attrs 25.3.0 is hashed only with md5"
+check "a weak hash" said "  requirements.txt:7: weak-hash: attrs 25.3.0 lists md5 hashes, so a file that matches one would be installed"
 check "git without a commit" said "  requirements.txt:8: unpinned-vcs: private-lib comes from git+https://github.com/example/private-lib@main"
 check "a path outside the checkout" \
     said "  requirements.txt:9: local-source: the path ../shared/vendored-lib is outside the lockfile's directory"
@@ -924,6 +930,25 @@ cat > "${JOB}/Pipfile.lock" << 'EOF'
  "default": {"requests": {"file": "https://github.com/psf/requests/archive/refs/heads/main.zip", "version": "==2.32.3"}},
  "develop": {}}
 EOF
+cat > "${JOB}/pylock.toml" << 'EOF'
+lock-version = "1.0"
+created-by = "test"
+
+[[packages]]
+name = "six"
+version = "1.17.0"
+index = "https://pypi.org/simple"
+wheels = [
+  { name = "six-1.17.0-py2.py3-none-any.whl", hashes = { sha256 = "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274" } },
+  { name = "six-1.17.0-py3-none-any.whl", hashes = { md5 = "0123456789abcdef0123456789abcdef" } },
+]
+EOF
+run lock_verify lockfiles=pylock.toml freshness=skip
+check "a file hashed only with MD5 beside one with SHA-256 is a weak hash" said "weak-hash: six 1.17.0 lists md5 hashes"
+printf 'six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274\n-rdeps.txt\n' > "${JOB}/requirements-top.txt"
+printf 'requests>=2\n' > "${JOB}/deps.txt"
+run lock_verify requirements=requirements-top.txt
+check "an include with its file attached to -r is followed" said "deps.txt:1: unpinned: requests is not pinned to one version (>=2)"
 run lock_verify lockfiles=Pipfile.lock freshness=skip report_only=true
 check "a Pipfile source without TLS verification is a finding" said "trusted-host: the source https://corp.example.com/simple has verify_ssl = false"
 check "a Pipfile file URL isn't a local path" said "unhashed: requests 2.32.3 has no hash"

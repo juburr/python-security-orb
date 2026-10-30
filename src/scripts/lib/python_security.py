@@ -363,7 +363,14 @@ def read_requirements(path, seen=None):
         if not line:
             continue
         if line.startswith("-"):
-            match = re.match(r"^(--?[A-Za-z-]+)(?:[=\s]+(\S+))?", line)
+            # As pip's optparse reads them: --long VALUE or --long=VALUE, and a
+            # short option's value attached or not (-rdeps.txt, -r deps.txt).
+            if line.startswith("--"):
+                match = re.match(r"^(--[A-Za-z-]+)(?:[=\s]+(\S+))?", line)
+            else:
+                match = re.match(r"^(-[A-Za-z])\s*(\S+)?", line)
+            if not match:
+                raise Refused("%s:%d: can't read the option '%s'" % (path, number, line))
             option, value = match.group(1), match.group(2)
             if option in ("-r", "--requirement") and value:
                 nested = read_requirements(os.path.join(base, value), seen)
@@ -539,7 +546,9 @@ def lock_findings(lock, options):
         if source == "registry" and not entry["version"]:
             finding("unpinned", "%s is not pinned to one version (%s)" % (entry["name"], entry.get("specifier") or "no version"), entry)
             continue
-        strong = [h for h in entry["hashes"] if h.split(":", 1)[0].lower() in ("sha256", "sha384", "sha512")]
+        # pip and uv install a file that matches any hash listed for it, so a
+        # weak one beside a strong one is as weak.
+        weak = sorted({h.split(":", 1)[0].lower() for h in entry["hashes"]} - {"sha256", "sha384", "sha512"})
         if not require_hashes:
             pass
         elif not entry["hashes"]:
@@ -547,8 +556,9 @@ def lock_findings(lock, options):
         elif entry["unhashed_artifacts"]:
             finding("unhashed", "%s has %d of its %d files without a hash, so those would be installed unchecked"
                     % (label.strip(), entry["unhashed_artifacts"], entry["artifacts"]), entry)
-        elif not strong:
-            finding("weak-hash", "%s is hashed only with %s" % (label.strip(), ", ".join(sorted({h.split(":")[0] for h in entry["hashes"]}))), entry)
+        if require_hashes and weak:
+            finding("weak-hash", "%s lists %s hashes, so a file that matches one would be installed; use SHA-256 or stronger"
+                    % (label.strip(), ", ".join(weak)), entry)
         if min_age > 0:
             if not entry["upload_times"]:
                 no_age.append(label.strip())

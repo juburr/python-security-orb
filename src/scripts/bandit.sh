@@ -173,7 +173,7 @@ error() {
 printf '[bandit]\n' > "${WORK}/bandit.ini"
 while IFS= read -r ini; do
     echo "WARN: ${ini} is not read: Bandit's settings come from this command's parameters and config." >&2
-done < <(find "${TARGETS[@]}" -name .bandit -type f 2> /dev/null | head -n 5)
+done < <(find "${TARGETS[@]}" -name .bandit -type f 2> /dev/null | awk 'NR <= 5')
 
 # Bandit's default exclusions are replaced by -x, so they go first. Bandit
 # leaves out a path that contains an entry, so .git also leaves out .github.
@@ -230,7 +230,9 @@ completed() {
     fi
     # A check that raised an exception on some code is only logged.
     if grep -qE 'Bandit internal error running:|Exception occurred when executing tests against' "$3"; then
-        grep -E 'Bandit internal error running:|Exception occurred when executing tests against' "$3" | head -n 5 | sed 's/^/  /' >&2
+        # awk reads every line, where head would end the pipeline early and
+        # fail the step with SIGPIPE under pipefail.
+        grep -E 'Bandit internal error running:|Exception occurred when executing tests against' "$3" | awk 'NR <= 5 { print "  " $0 }' >&2
         error "A Bandit check failed on some code, so that code wasn't fully checked."
     fi
     if grep -q 'Unknown test found in profile:' "$3"; then
@@ -263,7 +265,7 @@ try:
 except SyntaxError as error:
     print("    line %s: %s" % (error.lineno, error.msg))' "${file}" >&2 || true
         fi
-    done < <(jq -r '.errors[] | [.filename, .reason] | @tsv' "${REPORT}" | head -n 20)
+    done < <(jq -r '.errors[:20][] | [.filename, .reason] | @tsv' "${REPORT}")
     error "Bandit parses code with the Python it runs on (${TOOL_PYTHON:-unknown}), and skips what that Python can't parse." \
         "Fix the syntax, install Bandit with a newer python (install's python parameter) for code that needs one," \
         "or exclude the files."
@@ -345,7 +347,8 @@ PS_COUNTS=$(jq -c --argjson scanned "${SCANNED}" --argjson suppressed "${SUPPRES
     suppressed_without_reason: [$suppressed[] | select(.reason == "")] | length}' "${REPORT}")
 echo "Bandit scanned $(ps_plural "${SCANNED}" file files) ($(jq '.metrics._totals.loc // 0' "${REPORT}") lines): $(ps_plural "${FINDINGS}" finding findings)."
 if [[ "${FINDINGS}" -gt 0 ]]; then
-    jq -r '.results[] | "  \(.filename):\(.line_number): \(.test_id) \(.test_name) [\(.issue_severity)/\(.issue_confidence)]\n    \(.issue_text)"' "${REPORT}" | head -n 100
+    jq -r '(.results[:50][] | "  \(.filename):\(.line_number): \(.test_id) \(.test_name) [\(.issue_severity)/\(.issue_confidence)]\n    \(.issue_text)"),
+        (.results | length | select(. > 50) | "  ... and \(. - 50) more, in the reports.")' "${REPORT}"
 fi
 if [[ "${UNREASONED}" -gt 0 ]]; then
     echo "Suppressed without a reason (write it after a second #, as in '# nosec B602 # why it is safe'):"

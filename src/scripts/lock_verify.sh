@@ -160,7 +160,7 @@ for file in ${LOCKFILES[@]+"${LOCKFILES[@]}"} ${REQUIREMENTS[@]+"${REQUIREMENTS[
             else
                 index=$(jq -r '.index // empty' <<< "${finding}")
                 if [[ -n "${index}" ]]; then
-                    line=$(grep -nF -- "${index}" "${target}" 2> /dev/null | head -n 1 | cut -d: -f1 || true)
+                    line=$(grep -nF -- "${index}" "${target}" 2> /dev/null | awk -F: 'NR == 1 { print $1 }' || true)
                 fi
             fi
         fi
@@ -201,7 +201,7 @@ for ((i = 1; i <= n; i++)); do
             FRESH_ERRORS+=("${file}: ${message}, and freshness is require.")
         fi
     elif [[ -n "${tool}" ]]; then
-        version=$("${tool}" --version 2> /dev/null | head -n 1 || true)
+        version=$("${tool}" --version 2> /dev/null | awk 'NR == 1' || true)
         dir=$(dirname "${file}")
         code=0
         case "${tool}" in
