@@ -59,11 +59,15 @@ jobs:
             PYTHON: << parameters.python >>
           command: |
             set -x
-            uv --version | grep -qx 'uv 0.13.6'
+            # The first word of the first line that is a version: uv adds its
+            # target ("uv 0.13.6 (x86_64-unknown-linux-musl)"), and Bandit, run
+            # as python -m bandit, names itself "-m" ("-m 1.9.4").
+            version() { "$1" --version | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]/) { print $i; exit } }'; }
+            [[ "$(version uv)" == 0.13.6 ]]
             "${PYTHON_SECURITY_ORB_PYTHON}" --version | grep -q "^Python ${PYTHON}\."
-            pip-audit --version | grep -qx 'pip-audit 2.10.1'
-            bandit --version | head -n 1 | grep -qx 'bandit 1.9.4'
-            pip-licenses --version | grep -qx 'pip-licenses 5.5.5'
+            [[ "$(version pip-audit)" == 2.10.1 ]]
+            [[ "$(version bandit)" == 1.9.4 ]]
+            [[ "$(version pip-licenses)" == 5.5.5 ]]
             for tool in pip-audit bandit pip-licenses; do
                 record="${HOME}/.python-security-orb/bin/.${tool}.install.json"
                 jq -e --arg python "${PYTHON}" '.verified == true and (.python.version | startswith($python + "."))' "${record}"

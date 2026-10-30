@@ -17,6 +17,9 @@
 #     must be CPython 3.10 to 3.14
 #   - index_url and python_install_mirror are checked and passed on
 #   - the script that runs the tool, the install record, and the exports
+#   - a version from an environment variable, with a stand-in CircleCI CLI
+#     and without one (a real circleci on the PATH, as on CircleCI's images,
+#     is hidden from every run)
 #
 # Run from a checkout:
 #   bash tests/install_tool_test.sh
@@ -33,7 +36,43 @@ trap 'rm -rf "${WORK}"' EXIT
 STUB="${WORK}/stub"
 HOME_DIR="${WORK}/home"
 BIN="${HOME_DIR}/.python-security-orb/bin"
-mkdir -p "${STUB}" "${WORK}/path"
+mkdir -p "${STUB}" "${WORK}/path" "${WORK}/cli"
+
+# The PATH without a real circleci CLI, which CircleCI's images have: a
+# directory that holds one is replaced by one with links to everything else
+# in it, so each run decides whether there is a CLI.
+CLEAN_PATH=""
+IFS=: read -ra PATH_DIRS <<< "${PATH}"
+for dir in "${PATH_DIRS[@]}"; do
+    [[ -d "${dir}" ]] || continue
+    if [[ -e "${dir}/circleci" ]]; then
+        shadow=$(mktemp -d "${WORK}/path.XXXXXX")
+        for file in "${dir}"/*; do
+            [[ "${file##*/}" == circleci ]] || ln -s "${file}" "${shadow}/"
+        done
+        dir=${shadow}
+    fi
+    CLEAN_PATH+="${CLEAN_PATH:+:}${dir}"
+done
+
+# Like `circleci env subst`, expands $NAME and ${NAME} references, from stdin.
+cat > "${WORK}/cli/circleci" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$*" != "env subst" ]]; then
+    echo "circleci stub: expected 'env subst' with the value on stdin, got: $*" >&2
+    exit 1
+fi
+input=$(cat)
+output=""
+re='^([^$]*)\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(.*)$'
+while [[ "${input}" =~ ${re} ]]; do
+    name=${BASH_REMATCH[3]:-${BASH_REMATCH[4]}}
+    output+="${BASH_REMATCH[1]}${!name-}"
+    input=${BASH_REMATCH[5]}
+done
+printf '%s' "${output}${input}"
+EOF
+chmod +x "${WORK}/cli/circleci"
 
 # A stand-in interpreter: the platform question install_tool.sh asks, and a
 # tool's --version, from the "installed" file the stand-in uv writes in the
@@ -148,7 +187,7 @@ run() {
     : > "${WORK}/bash_env"
     mkdir -p "${BIN}"
     cp "${STUB}/uv" "${BIN}/uv"
-    OUTPUT=$(env HOME="${HOME_DIR}" PATH="${WORK}/path:${PATH}" BASH_ENV="${WORK}/bash_env" STUB_DIR="${STUB}" \
+    OUTPUT=$(env HOME="${HOME_DIR}" PATH="${WORK}/path:${CLEAN_PATH}" BASH_ENV="${WORK}/bash_env" STUB_DIR="${STUB}" \
         ${envs[@]+"${envs[@]}"} bash "${ROOT}/tests/run_command.sh" "${command}" ${params[@]+"${params[@]}"} 2>&1)
     RC=$?
 }
@@ -267,8 +306,12 @@ run install_bandit version=1.9.4 verify_checksums=false -- STUB_TOOL=bandit
 check "false installs a listed release unverified too" rc_is 0
 check "with a warning" said "WARN: verify_checksums is false"
 check "bandit with its toml extra" call_has "pip install" " bandit[toml]==1.9.4"
-run install_pip_audit version='$ORB_TEST_VERSION' -- STUB_TOOL=pip-audit ORB_TEST_VERSION=2.10.0 PATH="${WORK}/cli:${WORK}/path:${PATH}"
-check "a version from an environment variable without the CircleCI CLI is taken as is" rc_is 1
+run install_pip_audit version='$ORB_TEST_VERSION' -- STUB_TOOL=pip-audit ORB_TEST_VERSION=2.10.0 PATH="${WORK}/cli:${WORK}/path:${CLEAN_PATH}"
+check "a version from an environment variable is expanded by the CircleCI CLI" rc_is 0
+check "to the release it names" said "Installing pip-audit 2.10.0 from its lock"
+run install_pip_audit version='$ORB_TEST_VERSION' -- STUB_TOOL=pip-audit ORB_TEST_VERSION=2.10.0
+check "without the CLI it is taken as is" rc_is 1
+check "and refused, since it isn't a release" said "version must be a pip-audit release, such as 1.2.3, not '\$ORB_TEST_VERSION'"
 
 echo "=== the job's uv settings"
 run install_pip_audit -- STUB_TOOL=pip-audit UV_CONFIG_FILE=/tmp/evil.toml UV_PYTHON_DOWNLOADS_JSON_URL=https://evil.example/d.json \
@@ -352,7 +395,7 @@ mkdir -p "${HOME_DIR}/tools"
 cp "${STUB}/uv" "${HOME_DIR}/tools/uv"
 run install_pip_audit "install_path=~/tools" -- STUB_TOOL=pip-audit
 check "a leading ~ in install_path is the home directory, as install_uv reads it" test -x "${HOME_DIR}/tools/pip-audit"
-run install_pip_audit -- STUB_TOOL=pip-audit PATH="${BIN}:${WORK}/path:${PATH}"
+run install_pip_audit -- STUB_TOOL=pip-audit PATH="${BIN}:${WORK}/path:${CLEAN_PATH}"
 check "an install_path already on the PATH isn't added again" bash -c '! grep -q "^export PATH=" "$1"' _ "${WORK}/bash_env"
 
 echo "=== install_python"
