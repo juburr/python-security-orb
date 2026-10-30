@@ -502,6 +502,11 @@ def read_requirements(path, seen=None):
             hashes += url_hashes(match.group("url"))
         else:
             spec = (match.group("spec") or "").strip()
+            # PEP 508 lets a version specifier stand in parentheses:
+            # "requests (==2.32.3)".
+            bracketed = re.fullmatch(r"\(\s*(.*?)\s*\)", spec)
+            if bracketed:
+                spec = bracketed.group(1)
             pinned = re.fullmatch(r"===?\s*([A-Za-z0-9.+!_-]+)", spec)
             if pinned and "*" not in spec:
                 entry["version"] = pinned.group(1)

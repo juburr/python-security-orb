@@ -1022,6 +1022,10 @@ printf 'demo @ https://example.com/demo-1.0.tar.gz#sha256=%s\nhttps://example.co
 run lock_verify requirements=requirements-url-hash.txt report_only=true
 check "a direct URL's #sha256= fragment is its hash, as pip reads it" not_said "unhashed"
 check "and a weak one there is a weak hash" said "weak-hash: old lists md5 hashes"
+printf 'six (==1.17.0) --hash=sha256:%s\nsix[extra] ( >=1 ) --hash=sha256:%s\n' "${HEX}" "${HEX}" > "${JOB}/requirements-parens.txt"
+run lock_verify requirements=requirements-parens.txt report_only=true
+check "a pin in parentheses is a pin, as PEP 508 allows" not_said "==1.17.0)"
+check "and a range in them is still unpinned" said "unpinned: six is not pinned to one version (>=1)"
 printf -- '--no-such-option\n' > "${JOB}/requirements-top.txt"
 run lock_verify requirements=requirements-top.txt
 check "an option pip doesn't know is refused, as pip refuses it" said "requirements-top.txt:1: no such option --no-such-option"
