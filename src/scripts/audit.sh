@@ -204,7 +204,7 @@ if [[ -n "${ENVIRONMENT}" ]]; then
         error "Could not list the packages installed for ${ENVIRONMENT}."
     fi
     jq -c --arg path "${ENVIRONMENT}" '{path: $path, kind: "environment", lock_version: null, indexes: [], options: [],
-        packages: [.packages[] | {name, version, source: (.source // "registry"), location, commit, line: null}]}' \
+        packages: [.packages[] | {name, version, version_key, source: (.source // "registry"), location, commit, line: null}]}' \
         "${WORK}/env.json" > "${WORK}/inputs/${n}.json"
     PS_INPUTS+=("environment:${ENVIRONMENT}")
     # shellcheck disable=SC2034 # read by ps_run_record
@@ -279,11 +279,13 @@ ALLOW_JSON=$(jq -cn '[$ARGS.positional[] | ascii_downcase | gsub("[-_.]+"; "-")]
 jq -n --slurpfile report "${REPORT}" --slurpfile audited "${WORK}/audited.json" --slurpfile not_audited "${WORK}/not_audited.json" \
     --argjson ignore "${IGNORE_JSON}" --argjson allow "${ALLOW_JSON}" --arg service "${SERVICE}" '
     def canon: ascii_downcase | gsub("[-_.]+"; "-");
-    # pip-audit reports versions normalized (2018.04.16 as 2018.4.16).
+    # pip-audit reports versions normalized as PEP 440 says (v2.19.1 as
+    # 2.19.1, 2018.04.16 as 2018.4.16), which the helper wrote as version_key.
     def vnorm: split(".") | map(if test("^[0-9]+$") then tonumber | tostring else . end) | join(".");
+    def vkey: (.version_key // .version) | vnorm;
     ($report[0].dependencies) as $deps
-    | ($audited[0] | group_by([.name, (.version | vnorm)])
-        | map({key: "\(.[0].name)==\(.[0].version | vnorm)", value: [.[].input] | unique}) | from_entries) as $inputs
+    | ($audited[0] | group_by([.name, vkey])
+        | map({key: "\(.[0].name)==\(.[0] | vkey)", value: [.[].input] | unique}) | from_entries) as $inputs
     | [$deps[] | select(.vulns) | {name: (.name | canon), version, inputs: ($inputs["\(.name | canon)==\(.version | vnorm)"] // []),
         vulns: [.vulns[] | . as $v | [$ignore[] | . as $i | select(any(([$v.id] + ($v.aliases // []))[]; . == $i))] as $hits
             | $v + {ignored: ($hits | length > 0), ignore_entry: ($hits | first), ignore_entries: $hits}]}] as $packages

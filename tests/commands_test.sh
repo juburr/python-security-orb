@@ -105,8 +105,11 @@ ADVISORIES = {
 lock, out, skip = sys.argv[1], sys.argv[2], sys.argv[3]
 deps = []
 for p in tomllib.load(open(lock, "rb"))["packages"]:
-    # pip-audit reports versions normalized.
-    p["version"] = ".".join(str(int(part)) if part.isdigit() else part for part in p["version"].split("."))
+    # pip-audit reports versions normalized (a leading v dropped, numbers
+    # without leading zeros).
+    version = p["version"].strip().lower()
+    version = version[1:] if version.startswith("v") else version
+    p["version"] = ".".join(str(int(part)) if part.isdigit() else part for part in version.split("."))
     if p["name"] == skip:
         deps.append({"name": p["name"], "skip_reason": "Dependency not found on PyPI and could not be audited: %s (%s)" % (p["name"], p["version"])})
     else:
@@ -555,6 +558,10 @@ check "a report that leaves out the packages given fails the step, report_only o
 check "naming them" said "pip-audit's report leaves out packages it was given, so there is no verdict: certifi, chardet, idna, requests, urllib3."
 run audit "ignore=PYSEC-2018-28 CVE-2018-18074 GHSA-j8r2-6x86-q33q PYSEC-2019-133" unused_ignores=deny
 check "an ID and its alias for one vulnerability both count as used" rc_is 0
+printf 'requests==v2.19.1\n' > "${JOB}/requirements-v.txt"
+run audit requirements=requirements-v.txt report_only=true
+check "a version spelled as PEP 440 allows keeps its finding's input" \
+    json_is pip-audit.sarif '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique' '["requirements-v.txt"]'
 printf 'requests==2.19.01\n' > "${JOB}/requirements-zeros.txt"
 run audit requirements=requirements-zeros.txt report_only=true
 check "a version written with leading zeros keeps its finding's input" \
@@ -1026,6 +1033,24 @@ printf 'six (==1.17.0) --hash=sha256:%s\nsix[extra] ( >=1 ) --hash=sha256:%s\n' 
 run lock_verify requirements=requirements-parens.txt report_only=true
 check "a pin in parentheses is a pin, as PEP 508 allows" not_said "==1.17.0)"
 check "and a range in them is still unpinned" said "unpinned: six is not pinned to one version (>=1)"
+# A byte order mark is the file's encoding, not part of its first line.
+printf '\xef\xbb\xbfrequests>=2\nsix==1.17.0 --hash=sha256:%s\n' "${HEX}" > "${JOB}/requirements-bom.txt"
+run lock_verify requirements=requirements-bom.txt report_only=true
+check "a first requirement after a UTF-8 byte order mark is read" said "requirements-bom.txt:1: unpinned: requests is not pinned to one version (>=2)"
+python3 -c 'import sys; open(sys.argv[1], "wb").write("requests>=2\n".encode("utf-16"))' "${JOB}/requirements-bom.txt"
+run lock_verify requirements=requirements-bom.txt report_only=true
+check "and so is a UTF-16 file" said "requirements-bom.txt:1: unpinned: requests is not pinned to one version (>=2)"
+cat > "${JOB}/Pipfile.lock" << EOF
+{"_meta": {"hash": {"sha256": "0"}, "pipfile-spec": 6, "requires": {},
+           "sources": [{"name": "pypi", "url": "https://pypi.org/simple", "verify_ssl": true}]},
+ "default": {"six": {"hashes": ["sha256:${HEX}"], "index": "pypi", "version": "==1.17.0"}},
+ "develop": {},
+ "production": {"requests": {"index": "pypi", "version": "==2.19.1"}}}
+EOF
+run lock_verify lockfiles=Pipfile.lock freshness=skip report_only=true
+check "a custom Pipfile category's packages are checked" said "unhashed: requests 2.19.1 has no hash"
+run audit lockfiles=Pipfile.lock report_only=true
+check "and audited" said "requests 2.19.1: PYSEC-2018-28"
 # ${NAME} in a requirements file is the variable's value, as pip expands it.
 printf 'six==1.17.0 --hash=sha256:%s\n${DEPENDENCY}\n-r ${MORE_DIR}/deps.txt\n--extra-index-url https://${IDX_USER}:${IDX_TOKEN}@corp.example.com/simple\n' "${HEX}" > "${JOB}/requirements-env.txt"
 mkdir -p "${JOB}/more"

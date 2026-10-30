@@ -53,6 +53,42 @@ def canonical(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# packaging's VERSION_PATTERN (PEP 440, appendix B).
+PEP440 = re.compile(r"""^\s*v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>[-_.]?(?P<pre_l>alpha|beta|preview|pre|a|b|c|rc)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?P<post>(?:-(?P<post_n1>[0-9]+))|(?:[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?))?
+    (?P<dev>[-_.]?(?P<dev_l>dev)[-_.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    \s*$""", re.VERBOSE | re.IGNORECASE)
+PRE_LETTERS = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
+
+
+def pep440(version):
+    """A version as pip-audit reports it (packaging's str(Version(v))):
+    v2.19.1 as 2.19.1, 2018.04.16 as 2018.4.16, 1.0-1 as 1.0.post1. A
+    version that isn't PEP 440 is returned as it is."""
+    match = PEP440.match(version or "")
+    if not match:
+        return version
+    out = ""
+    if match.group("epoch") and int(match.group("epoch")):
+        out += "%d!" % int(match.group("epoch"))
+    out += ".".join(str(int(part)) for part in match.group("release").split("."))
+    if match.group("pre"):
+        letter = match.group("pre_l").lower()
+        out += "%s%d" % (PRE_LETTERS.get(letter, letter), int(match.group("pre_n") or 0))
+    if match.group("post"):
+        out += ".post%d" % int(match.group("post_n1") or match.group("post_n2") or 0)
+    if match.group("dev"):
+        out += ".dev%d" % int(match.group("dev_n") or 0)
+    if match.group("local"):
+        out += "+" + ".".join(str(int(part)) if part.isdigit() else part.lower()
+                              for part in re.split(r"[-_.]", match.group("local")))
+    return out
+
+
 def toml_load(path):
     try:
         import tomllib
@@ -286,7 +322,12 @@ def read_pipfile(path):
     # its certificate, as --trusted-host does.
     options = [{"option": "verify_ssl", "value": s.get("url"), "line": None, "file": path}
                for s in sources.values() if s.get("url") and s.get("verify_ssl") is False]
-    for group in ("default", "develop"):
+    # Pipenv writes custom package categories beside default and develop,
+    # in the same form.
+    groups = ["default", "develop"] + sorted(set(data) - {"_meta", "default", "develop"})
+    for group in groups:
+        if not isinstance(data.get(group, {}), dict):
+            raise Refused("%s: the %s category is not a table of packages" % (path, group))
         for name, raw in sorted(data.get(group, {}).items()):
             version = raw.get("version")
             if version and version.startswith("=="):
@@ -448,10 +489,23 @@ def read_requirements(path, seen=None):
         return {"lock_version": None, "indexes": [], "packages": [], "options": []}
     seen.add(real)
     try:
-        with open(path, encoding="utf-8") as handle:
-            raw_lines = handle.read().split("\n")
+        with open(path, "rb") as handle:
+            data = handle.read()
     except OSError as error:
         raise Refused("can't read %s: %s" % (path, error.strerror))
+    # As pip's auto_decode: a byte order mark says the encoding, and is
+    # not part of the first line.
+    import codecs
+    encoding = "utf-8"
+    for bom, name in ((codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF8, "utf-8-sig"),
+                      (codecs.BOM_UTF16_BE, "utf-16"), (codecs.BOM_UTF16_LE, "utf-16")):
+        if data.startswith(bom):
+            encoding = name
+            break
+    try:
+        raw_lines = data.decode(encoding).splitlines()
+    except UnicodeDecodeError as error:
+        raise Refused("can't read %s as %s: %s" % (path, encoding, error))
     # Joined continuation lines, each with the number of its first line, as
     # pip's join_lines does: a comment line never continues, and ends a
     # continuation.
@@ -574,6 +628,8 @@ def read_lock(path, kind=None):
     result.setdefault("indexes", [])
     result["path"] = path
     result["kind"] = kind
+    for entry in result["packages"]:
+        entry["version_key"] = pep440(entry["version"]) if entry["version"] else None
     return redact_lock(result)
 
 
@@ -588,12 +644,13 @@ def write_pylock(entries, out):
     seen = set()
     lines = ['lock-version = "1.0"', 'created-by = "python-security-orb"', ""]
     for entry in sorted(entries, key=lambda e: (e["name"], e["version"] or "")):
-        key = (entry["name"], entry["version"])
-        if not entry["version"] or key in seen:
+        version = entry.get("version_key") or entry["version"]
+        key = (entry["name"], version)
+        if not version or key in seen:
             continue
         seen.add(key)
         lines += ["[[packages]]", "name = %s" % toml_string(entry["name"]),
-                  "version = %s" % toml_string(entry["version"]), ""]
+                  "version = %s" % toml_string(version), ""]
     with open(out, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
     return len(seen)
@@ -810,7 +867,7 @@ def installed(check_record, paths=None):
         # The inventory lists the first copy, the one Python imports.
         entry, where = found.get(key), ""
         if entry is None:
-            entry = {"name": key[0], "version": dist.version, "path": location}
+            entry = {"name": key[0], "version": dist.version, "version_key": pep440(dist.version), "path": location}
             entry.update(direct_source(dist))
             found[key] = entry
         else:
