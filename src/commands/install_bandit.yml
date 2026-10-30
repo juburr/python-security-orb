@@ -1,0 +1,130 @@
+description: >
+  Installs Bandit, PyCQA's scanner for security problems in Python code, which
+  the bandit command runs, into an environment of its own on the Python that
+  python names, with uv. uv installs this orb's lock for that release, which
+  pins bandit and every dependency to one version and every file to its
+  SHA-256, so a changed or added file fails the install before anything runs;
+  wheels only, so no build code runs either. A script in install_path runs it
+  with python -I, so a job's PYTHONPATH and a project's packages stay out of
+  it. Bandit parses code with its own Python, which must be at least as new as
+  the code's syntax: a file it can't parse is a failed scan, not a pass.
+parameters:
+  version:
+    type: string
+    default: "1.9.4"
+    description: >
+      The bandit release to install, such as 1.9.4. strict verification
+      installs only the releases this orb has a lock for. A leading "v" is
+      ignored, and environment variables are expanded.
+  index_url:
+    type: string
+    default: "https://pypi.org/simple"
+    description: >
+      The package index to download from, such as a PyPI mirror in Artifactory
+      or Nexus: an https:// URL, without credentials or a query or fragment.
+      The lock's hashes decide what is installed, so a mirror can only make
+      the install fail. Environment variables are expanded.
+  python:
+    type: string
+    default: "3.14"
+    description: >
+      The Python bandit runs on: 3.10 to 3.14 for a CPython that uv downloads
+      and checks against the SHA-256 it carries for that build (the uv release
+      decides the patch release), "system" for the python3 on the PATH, or an
+      interpreter's absolute path. The locks cover CPython 3.10 to 3.14 on
+      Linux. Environment variables are expanded.
+  python_install_mirror:
+    type: string
+    default: ""
+    description: >
+      Base URL of a mirror of uv's Python downloads (python-build-standalone
+      releases), https:// or file://, for networks that can't reach GitHub. uv
+      still checks every download against the SHA-256 it carries. Environment
+      variables are expanded.
+  caching:
+    type: boolean
+    default: true
+    description: >
+      Cache uv (see install_uv) and the Python archive uv downloads, between
+      jobs. uv checks the archive against its SHA-256 every time it unpacks
+      it. Installed environments and packages are never cached.
+  install_path:
+    type: string
+    default: ""
+    description: >
+      Absolute path of the directory uv is in (see install_uv), where bandit
+      goes, with the script that runs it. It is added to the PATH of later
+      steps when it isn't already on it. Environment variables are expanded.
+      Defaults to $HOME/.python-security-orb/bin.
+  install_uv:
+    type: boolean
+    default: true
+    description: >
+      Install uv first, with install_uv and uv_version. Set it to false when
+      an earlier install_uv in the job put uv in install_path, as the install
+      command does.
+  uv_version:
+    type: string
+    default: "0.13.6"
+    description: The version of uv to install first (see install_uv). Environment variables are expanded.
+  download_base_url:
+    type: string
+    default: ""
+    description: >
+      Base URL of an internal mirror of GitHub releases to download uv from
+      (see install_uv). Environment variables are expanded.
+  verify_checksums:
+    type: enum
+    enum: ["false", "known_versions", "strict"]
+    default: strict
+    description: >
+      Verification of uv against this orb's checksum table, and of bandit
+      against this orb's lock for the release. "strict" (default) fails before
+      downloading anything when uv's version has no checksum, or bandit's
+      release no lock. "known_versions" installs unlisted versions unverified,
+      with a warning. "false" skips verification and is not recommended.
+steps:
+  - when:
+      condition: << parameters.install_uv >>
+      steps:
+        - install_uv:
+            caching: << parameters.caching >>
+            download_base_url: << parameters.download_base_url >>
+            install_path: << parameters.install_path >>
+            verify_checksums: << parameters.verify_checksums >>
+            version: << parameters.uv_version >>
+  - when:
+      condition: << parameters.caching >>
+      steps:
+        # uv checks a cached Python archive against the SHA-256 it carries
+        # whenever it unpacks it, so the cache is never trusted on its own.
+        - run:
+            name: Prepare Python cache key
+            environment:
+              ORB_CACHE_KEY_FILE: /tmp/python-security-orb-python-cache-key
+              PARAM_PYTHON: << parameters.python >>
+              PARAM_UV_VERSION: << parameters.uv_version >>
+            command: << include(scripts/python_cache_key.sh) >>
+        - restore_cache:
+            key: python-security-orb-python-v1-{{ checksum "/tmp/python-security-orb-python-cache-key" }}
+  - run:
+      name: Install bandit << parameters.version >>
+      environment:
+        PARAM_CACHING: << parameters.caching >>
+        PARAM_INDEX_URL: << parameters.index_url >>
+        PARAM_INSTALL_PATH: << parameters.install_path >>
+        PARAM_PYTHON: << parameters.python >>
+        PARAM_PYTHON_INSTALL_MIRROR: << parameters.python_install_mirror >>
+        PARAM_TOOL: bandit
+        PARAM_VERIFY_CHECKSUMS: << parameters.verify_checksums >>
+        PARAM_VERSION: << parameters.version >>
+        PS_LOCKS: << include(install/bandit/locks.txt) >>
+        SCRIPT_PYTHON_SECURITY_LIB: << include(scripts/lib/python_security.sh) >>
+      command: << include(scripts/install_tool.sh) >>
+  - when:
+      condition: << parameters.caching >>
+      steps:
+        - save_cache:
+            key: python-security-orb-python-v1-{{ checksum "/tmp/python-security-orb-python-cache-key" }}
+            paths:
+              - ~/.cache/python-security-orb/python

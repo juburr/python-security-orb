@@ -1,0 +1,163 @@
+description: >
+  Installs the Python security tools named in tools, through the install
+  command for each (install_pip_audit, install_bandit, install_pip_licenses),
+  which can also be used on their own. uv comes first, verified against this
+  orb's checksum table (install_uv); it installs a CPython it checks against
+  the SHA-256 it carries, then each tool into an environment of its own from
+  this orb's lock for the release, which pins every file to its SHA-256. Run
+  this before the orb's other commands.
+parameters:
+  tools:
+    type: string
+    default: "pip-audit,bandit"
+    description: >
+      The tools to install, separated by commas or spaces: any of pip-audit
+      (for audit), bandit (for bandit), pip-licenses (for licenses), python
+      (the Python alone, for lock_verify) and uv. uv is always installed. An
+      unknown name fails the step.
+  pip_audit_version:
+    type: string
+    default: "2.10.1"
+    description: The pip-audit release, when tools names it. Environment variables are expanded.
+  bandit_version:
+    type: string
+    default: "1.9.4"
+    description: The Bandit release, when tools names it. Environment variables are expanded.
+  pip_licenses_version:
+    type: string
+    default: "5.5.5"
+    description: The pip-licenses release, when tools names it. Environment variables are expanded.
+  python:
+    type: string
+    default: "3.14"
+    description: >
+      The Python the tools run on: 3.10 to 3.14 for a CPython that uv
+      downloads and checks against the SHA-256 it carries for that build,
+      "system" for the python3 on the PATH, or an interpreter's absolute path.
+      Bandit parses code with it, so it must be at least as new as the code's
+      syntax. Environment variables are expanded.
+  index_url:
+    type: string
+    default: "https://pypi.org/simple"
+    description: >
+      The package index to download the tools from, such as a PyPI mirror: an
+      https:// URL, without credentials or a query or fragment. The locks'
+      hashes decide what is installed. Environment variables are expanded.
+  python_install_mirror:
+    type: string
+    default: ""
+    description: >
+      Base URL of a mirror of uv's Python downloads, https:// or file://. uv
+      still checks every download against the SHA-256 it carries. Environment
+      variables are expanded.
+  download_base_url:
+    type: string
+    default: ""
+    description: >
+      Base URL of an internal mirror of GitHub releases to download uv from
+      instead of https://github.com, such as an Artifactory or Nexus remote
+      repository: an https:// URL, without credentials or a query or fragment.
+      Environment variables are expanded.
+  uv_version:
+    type: string
+    default: "0.13.6"
+    description: The uv release. Environment variables are expanded.
+  caching:
+    type: boolean
+    default: true
+    description: >
+      Cache uv's verified release and the Python archive uv downloads between
+      jobs. Both are checked again whenever they are used. Installed
+      environments and packages are never cached.
+  install_path:
+    type: string
+    default: ""
+    description: >
+      Absolute path of the directory to install uv and the scripts that run
+      the tools into. It is added to the PATH of later steps when it isn't
+      already on it. Environment variables are expanded. Defaults to
+      $HOME/.python-security-orb/bin.
+  verify_checksums:
+    type: enum
+    enum: ["false", "known_versions", "strict"]
+    default: strict
+    description: >
+      Verification of uv against this orb's checksum table, and of each tool
+      against this orb's lock for its release. "strict" (default) fails before
+      downloading anything when a version has no checksum or lock.
+      "known_versions" installs unlisted versions unverified, with a warning.
+      "false" skips verification and is not recommended.
+steps:
+  - run:
+      name: Check the tools to install
+      environment:
+        PARAM_TOOLS: << parameters.tools >>
+      command: << include(scripts/install_tools.sh) >>
+  - install_uv:
+      caching: << parameters.caching >>
+      download_base_url: << parameters.download_base_url >>
+      install_path: << parameters.install_path >>
+      verify_checksums: << parameters.verify_checksums >>
+      version: << parameters.uv_version >>
+  - when:
+      condition:
+        matches:
+          pattern: "^(.*[ ,])?python([ ,].*)?$"
+          value: << parameters.tools >>
+      steps:
+        - install_python:
+            caching: << parameters.caching >>
+            install_path: << parameters.install_path >>
+            install_uv: false
+            python: << parameters.python >>
+            python_install_mirror: << parameters.python_install_mirror >>
+            uv_version: << parameters.uv_version >>
+            verify_checksums: << parameters.verify_checksums >>
+  - when:
+      condition:
+        matches:
+          pattern: "^(.*[ ,])?pip-audit([ ,].*)?$"
+          value: << parameters.tools >>
+      steps:
+        - install_pip_audit:
+            caching: << parameters.caching >>
+            index_url: << parameters.index_url >>
+            install_path: << parameters.install_path >>
+            install_uv: false
+            python: << parameters.python >>
+            python_install_mirror: << parameters.python_install_mirror >>
+            uv_version: << parameters.uv_version >>
+            verify_checksums: << parameters.verify_checksums >>
+            version: << parameters.pip_audit_version >>
+  - when:
+      condition:
+        matches:
+          pattern: "^(.*[ ,])?bandit([ ,].*)?$"
+          value: << parameters.tools >>
+      steps:
+        - install_bandit:
+            caching: << parameters.caching >>
+            index_url: << parameters.index_url >>
+            install_path: << parameters.install_path >>
+            install_uv: false
+            python: << parameters.python >>
+            python_install_mirror: << parameters.python_install_mirror >>
+            uv_version: << parameters.uv_version >>
+            verify_checksums: << parameters.verify_checksums >>
+            version: << parameters.bandit_version >>
+  - when:
+      condition:
+        matches:
+          pattern: "^(.*[ ,])?pip-licenses([ ,].*)?$"
+          value: << parameters.tools >>
+      steps:
+        - install_pip_licenses:
+            caching: << parameters.caching >>
+            index_url: << parameters.index_url >>
+            install_path: << parameters.install_path >>
+            install_uv: false
+            python: << parameters.python >>
+            python_install_mirror: << parameters.python_install_mirror >>
+            uv_version: << parameters.uv_version >>
+            verify_checksums: << parameters.verify_checksums >>
+            version: << parameters.pip_licenses_version >>

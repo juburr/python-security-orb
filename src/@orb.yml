@@ -1,0 +1,14 @@
+version: 2.1
+
+description: >
+  Check Python projects for security: pip-audit for known vulnerabilities
+  in locked dependencies, Bandit for security problems in the code,
+  pip-licenses against a license policy, and lockfile hashes and freshness.
+  Each tool is installed with uv into its own environment from a lock that
+  pins every file by its hash. JSON, SARIF and JUnit reports, run records,
+  and a gate that never passes a scan that checked nothing. Every command
+  has a GitHub Action of the same name.
+
+display:
+  home_url: "https://github.com/juburr/python-security-orb"
+  source_url: "https://github.com/juburr/python-security-orb"
