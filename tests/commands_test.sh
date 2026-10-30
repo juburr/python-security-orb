@@ -1026,6 +1026,22 @@ printf 'six (==1.17.0) --hash=sha256:%s\nsix[extra] ( >=1 ) --hash=sha256:%s\n' 
 run lock_verify requirements=requirements-parens.txt report_only=true
 check "a pin in parentheses is a pin, as PEP 508 allows" not_said "==1.17.0)"
 check "and a range in them is still unpinned" said "unpinned: six is not pinned to one version (>=1)"
+# ${NAME} in a requirements file is the variable's value, as pip expands it.
+printf 'six==1.17.0 --hash=sha256:%s\n${DEPENDENCY}\n-r ${MORE_DIR}/deps.txt\n--extra-index-url https://${IDX_USER}:${IDX_TOKEN}@corp.example.com/simple\n' "${HEX}" > "${JOB}/requirements-env.txt"
+mkdir -p "${JOB}/more"
+printf 'idna>=2\n' > "${JOB}/more/deps.txt"
+run lock_verify requirements=requirements-env.txt report_only=true -- DEPENDENCY='requests>=2' MORE_DIR=more IDX_USER=me IDX_TOKEN=env-secret
+check "a requirement in an environment variable is read as pip expands it" said "requirements-env.txt:2: unpinned: requests is not pinned to one version (>=2)"
+check "and so is an include's path" said "deps.txt:1: unpinned: idna is not pinned to one version (>=2)"
+check "and a token in an index URL stays out of the output" script_lacks "env-secret"
+check "and out of the reports" bash -c '! grep -rq env-secret "$1"' _ "${OUT}"
+run lock_verify requirements=requirements-env.txt -- MORE_DIR=more
+check "a requirement in a variable that isn't set is refused, not taken for a path" rc_is 1
+check "naming the variable, and the line as written" \
+    said "requirements-env.txt:2: the environment variable DEPENDENCY is not set (or empty), so '\${DEPENDENCY}' can't be read as pip would read it"
+printf 'six==1.17.0 --hash=sha256:%s\n--extra-index-url https://${IDX_USER}:${IDX_TOKEN}@corp.example.com/simple\n' "${HEX}" > "${JOB}/requirements-env.txt"
+run lock_verify requirements=requirements-env.txt
+check "an index URL's unset credentials don't stop the check" rc_is 0
 printf -- '--no-such-option\n' > "${JOB}/requirements-top.txt"
 run lock_verify requirements=requirements-top.txt
 check "an option pip doesn't know is refused, as pip refuses it" said "requirements-top.txt:1: no such option --no-such-option"

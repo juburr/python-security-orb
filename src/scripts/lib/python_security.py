@@ -367,16 +367,41 @@ REQ_OPTIONS = {
 REQ_SHORT = {"-i": "--index-url", "-c": "--constraint", "-r": "--requirement", "-e": "--editable", "-f": "--find-links"}
 
 
-def option_tokens(text, where):
+# pip's ENV_VAR_RE: what a requirements file may name an environment variable.
+ENV_VAR = re.compile(r"(\$\{([A-Z0-9_]+)\})")
+
+
+def expand_env(line):
+    """A requirements line with its ${NAME} placeholders replaced, as pip's
+    expand_env_variables does: by the variable's value when it is set and not
+    empty; otherwise the placeholder stays as written."""
+    for placeholder, name in ENV_VAR.findall(line):
+        value = os.environ.get(name)
+        if value:
+            line = line.replace(placeholder, value)
+    return line
+
+
+def require_set(text, where, shown):
+    """Refuses a placeholder pip would leave as written in a requirement or
+    an include: the package or file it names isn't the one pip would read."""
+    unset = ENV_VAR.search(text)
+    if unset:
+        raise Refused("%s: the environment variable %s is not set (or empty), so '%s' can't be read as pip "
+                      "would read it; set it in this job as for the install" % (where, unset.group(2), shown))
+
+
+def option_tokens(text, where, shown=None):
     """(option, value) for each option on a requirements option line, as
     pip's optparse reads them: the whole line, split like a shell would,
     long options abbreviated to any unique prefix, and a short option's value
     attached or not. Words that aren't options are ignored, as pip does."""
     import shlex
+    shown = text if shown is None else shown
     try:
         tokens = shlex.split(text)
     except ValueError as error:
-        raise Refused("%s: can't read the options '%s': %s" % (where, text, error))
+        raise Refused("%s: can't read the options '%s': %s" % (where, shown, error))
     found, index = [], 0
     while index < len(tokens):
         token = tokens[index]
@@ -388,27 +413,27 @@ def option_tokens(text, where):
             matches = [option for option in REQ_OPTIONS if option == name] \
                 or [option for option in REQ_OPTIONS if option.startswith(name)]
             if len(matches) != 1:
-                raise Refused("%s: %s option %s in '%s'" % (where, "no such" if not matches else "ambiguous", name, text))
+                raise Refused("%s: %s option %s in '%s'" % (where, "no such" if not matches else "ambiguous", name, shown))
             name = matches[0]
             if not REQ_OPTIONS[name]:
                 if equals:
-                    raise Refused("%s: %s takes no value, in '%s'" % (where, name, text))
+                    raise Refused("%s: %s takes no value, in '%s'" % (where, name, shown))
                 found.append((name, None))
                 continue
             if not equals:
                 if index >= len(tokens):
-                    raise Refused("%s: %s needs a value, in '%s'" % (where, name, text))
+                    raise Refused("%s: %s needs a value, in '%s'" % (where, name, shown))
                 value = tokens[index]
                 index += 1
             found.append((name, value))
         elif token.startswith("-") and len(token) > 1:
             name = REQ_SHORT.get(token[:2])
             if not name:
-                raise Refused("%s: no such option %s in '%s'" % (where, token[:2], text))
+                raise Refused("%s: no such option %s in '%s'" % (where, token[:2], shown))
             value = token[2:]
             if not value:
                 if index >= len(tokens):
-                    raise Refused("%s: %s needs a value, in '%s'" % (where, token[:2], text))
+                    raise Refused("%s: %s needs a value, in '%s'" % (where, token[:2], shown))
                 value = tokens[index]
                 index += 1
             found.append((name, value))
@@ -450,8 +475,13 @@ def read_requirements(path, seen=None):
         line = re.sub(r"(^|\s)#.*$", "", line).strip()
         if not line:
             continue
+        # pip expands ${NAME} after joining lines and dropping comments.
+        shown, line = line, expand_env(line)
+        where = "%s:%d" % (path, number)
         if line.startswith("-"):
-            for option, value in option_tokens(line, "%s:%d" % (path, number)):
+            for option, value in option_tokens(line, where, shown):
+                if option in ("--requirement", "--editable"):
+                    require_set(value, where, shown)
                 if option == "--requirement":
                     nested = read_requirements(os.path.join(base, value), seen)
                     for key in ("indexes", "packages", "options"):
@@ -471,6 +501,7 @@ def read_requirements(path, seen=None):
                 else:
                     result["options"].append({"option": option, "value": value, "line": number, "file": path})
             continue
+        require_set(line, where, shown)
         hashes = re.findall(r"--hash[=\s]+([A-Za-z0-9]+:[0-9A-Fa-f]+)", line)
         spec_text = re.sub(r"\s--hash[=\s]+\S+", "", " " + line).strip()
         if URL_START.match(spec_text):
