@@ -1,11 +1,11 @@
 """A fixture with nothing for Bandit to find."""
 
 import hashlib
-import subprocess
+import json
 
 
-def run(arguments):
-    return subprocess.run(arguments, check=True)
+def load(text):
+    return json.loads(text)
 
 
 def digest(data):

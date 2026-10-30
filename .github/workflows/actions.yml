@@ -190,7 +190,7 @@ jobs:
         run: |
           set -x
           [[ "${FAILS}" == "failure" ]]
-          jq -e '[.results[].test_id] | sort == ["B324", "B602"]' "${REPORTS}/bandit-vulnerable.json"
+          jq -e '[.results[].test_id] | sort == ["B324", "B403", "B404", "B602"]' "${REPORTS}/bandit-vulnerable.json"
           jq -e '[.[] | [.test_id, .reason]] == [["B301", ""], ["B108", "a fixed path in a test fixture"]]' \
             "${REPORTS}/bandit-vulnerable.suppressed.json"
       - name: Validate the reports

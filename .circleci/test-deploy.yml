@@ -211,7 +211,7 @@ jobs:
           name: Check what Bandit found
           command: |
             set -x
-            jq -e '[.results[].test_id] | sort == ["B324", "B602"]' /tmp/python-security-reports/bandit-vulnerable.json
+            jq -e '[.results[].test_id] | sort == ["B324", "B403", "B404", "B602"]' /tmp/python-security-reports/bandit-vulnerable.json
             jq -e '[.[] | [.test_id, .reason]] == [["B301", ""], ["B108", "a fixed path in a test fixture"]]' \
                 /tmp/python-security-reports/bandit-vulnerable.suppressed.json
             jq -e '.counts.suppressed_without_reason == 1' /tmp/python-security-reports/bandit-vulnerable.run-record.json
@@ -222,7 +222,7 @@ jobs:
                 cat /tmp/bandit.log
                 exit 1
             fi
-            grep -q '^ERROR: Bandit found 2 problems.' /tmp/bandit.log
+            grep -q '^ERROR: Bandit found 4 problems.' /tmp/bandit.log
             mkdir -p /tmp/broken
             cp tests/fixtures/bandit/new.py tests/fixtures/clean/app.py /tmp/broken/
             if bash tests/run_command.sh bandit working_dir=/tmp/broken report_name=bandit-broken report_only=true > /tmp/broken.log 2>&1; then
