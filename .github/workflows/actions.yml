@@ -83,12 +83,13 @@ jobs:
         continue-on-error: true
         with:
           version: 2.9.0
-          install_uv: "false"
           install_path: ~/unlisted
       - name: Verify an unlisted release fails closed
         env:
           UNLISTED: ${{ steps.unlisted.outcome }}
         run: |
+          # uv is there, so the release is what failed, not a missing uv.
+          [[ -x ~/unlisted/uv ]]
           [[ "${UNLISTED}" == "failure" ]]
           [[ ! -e ~/unlisted/pip-audit ]]
 
