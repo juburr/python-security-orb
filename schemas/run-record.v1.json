@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/juburr/python-security-orb/blob/main/schemas/run-record.v1.json",
+  "title": "python-security-orb run record, version 1",
+  "description": "What one python-security-orb command ran, on what, and what it found: written as <report_name>.run-record.json when a command's run_record parameter is true. Fields are only ever added within version 1; a change that would break a reader gets a new schema URL.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "outcome",
+    "exit_code",
+    "started_at",
+    "finished_at",
+    "ci",
+    "working_directory",
+    "tool",
+    "arguments",
+    "target",
+    "inputs",
+    "counts",
+    "results",
+    "reports"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://github.com/juburr/python-security-orb/blob/main/schemas/run-record.v1.json"
+    },
+    "command": {
+      "description": "The orb command that wrote the record.",
+      "enum": [
+        "audit",
+        "bandit",
+        "licenses",
+        "lock_verify"
+      ]
+    },
+    "outcome": {
+      "description": "passed: no findings. findings: findings failed the step. findings-reported: findings, passed because report_only is true. error: a check did not complete, or checked nothing, so there is no verdict, and the step failed.",
+      "enum": [
+        "passed",
+        "findings",
+        "findings-reported",
+        "error"
+      ]
+    },
+    "exit_code": {
+      "description": "1 when the outcome is error, else 0. The step's own exit code also depends on report_only.",
+      "type": "integer"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "ci": {
+      "description": "The CI job the command ran in: a CircleCI job (from CIRCLE_BUILD_URL, CIRCLE_SHA1, CIRCLE_JOB and the project), or a GitHub Actions run (from GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_SHA and GITHUB_JOB); null elsewhere.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider",
+            "build_url",
+            "sha1",
+            "job",
+            "repository"
+          ],
+          "properties": {
+            "provider": {
+              "enum": [
+                "circleci",
+                "github-actions"
+              ]
+            },
+            "build_url": {
+              "type": "string"
+            },
+            "sha1": {
+              "type": "string"
+            },
+            "job": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "working_directory": {
+      "description": "The absolute directory the command ran in. Relative paths in arguments and results are relative to it.",
+      "type": "string"
+    },
+    "tool": {
+      "description": "The tool the command ran: pip-audit, bandit or pip-licenses, as the script on the PATH that runs it; null for lock_verify, which runs only the orb's own helper and the package managers it names in results.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/tool"
+        }
+      ]
+    },
+    "arguments": {
+      "description": "The arguments the tool ran with, without the paths of files the command made itself. URLs lose their userinfo, query and fragment.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target": {
+      "description": "The installed environment the command checked, when it checked one (audit's environment, licenses' python, lock_verify's python): its interpreter, Python version and number of distributions. null otherwise.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "python",
+            "version",
+            "packages"
+          ],
+          "properties": {
+            "python": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "packages": {
+              "type": "integer"
+            }
+          }
+        }
+      ]
+    },
+    "inputs": {
+      "description": "The files the result depends on, by role: lockfiles by kind, requirements files, the environment's interpreter, Bandit's configuration.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "role",
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "uv.lock",
+              "poetry.lock",
+              "pdm.lock",
+              "Pipfile.lock",
+              "pylock",
+              "requirements",
+              "environment",
+              "config",
+              "baseline"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "description": "null when the path isn't a regular file.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/$defs/sha256"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "counts": {
+      "description": "The command's own summary of what it found, such as the packages audited, the vulnerabilities that count and those ignore accepted.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "results": {
+      "description": "One entry per item checked, where the command checks several, such as each lockfile for lock_verify. null for the others.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object"
+      }
+    },
+    "reports": {
+      "description": "Every report the command wrote, with its SHA-256.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha512": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$"
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "version",
+        "sha512",
+        "install"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The script on the PATH that ran the tool.",
+          "type": "string"
+        },
+        "version": {
+          "description": "What the tool reports as its version; empty when it reports none.",
+          "type": "string"
+        },
+        "sha512": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha512"
+            }
+          ]
+        },
+        "install": {
+          "description": "How the orb installed the tool, from the record its install command left beside the script. null when there is none, or when it describes another script than the one that ran.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "tool",
+                "version",
+                "verified",
+                "verify_checksums",
+                "python",
+                "uv",
+                "venv"
+              ],
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "verified": {
+                  "description": "true when every installed file was checked against the orb's lock for the release.",
+                  "type": "boolean"
+                },
+                "verify_checksums": {
+                  "enum": [
+                    "strict",
+                    "known_versions",
+                    "false"
+                  ]
+                },
+                "lock_sha256": {
+                  "description": "The SHA-256 of the lock installed; null when unverified.",
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  ]
+                },
+                "python": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "version",
+                    "source"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "description": "uv: a CPython uv downloaded and checked against the SHA-256 it carries. system: the python3 on the PATH. path: an interpreter named by its path.",
+                      "enum": [
+                        "uv",
+                        "system",
+                        "path"
+                      ]
+                    }
+                  }
+                },
+                "uv": {
+                  "description": "The uv version that installed it.",
+                  "type": "string"
+                },
+                "index": {
+                  "description": "The package index, without userinfo, query and fragment.",
+                  "type": "string"
+                },
+                "venv": {
+                  "description": "The environment the tool runs in.",
+                  "type": "string"
+                },
+                "packages": {
+                  "description": "What uv pip list reported in the environment.",
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

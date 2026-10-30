@@ -397,3 +397,140 @@ ps_args_json() {
             | gsub("(?<url>[A-Za-z][A-Za-z0-9+.-]*://[^?#\\s]*)[?#]\\S*"; "\(.url)"))'
 }
 
+# ps_show_command ARG...: the arguments as one line to log, each quoted for
+# the shell only when it needs it, and URLs stripped as ps_args_json strips
+# them.
+ps_show_command() {
+    if [[ $# -eq 0 ]]; then
+        return 0
+    fi
+    ps_args_json "$@" | jq -r 'map(if test("^[A-Za-z0-9_./:=@%+,-]+$") then . else @sh end) | join(" ")'
+}
+
+# ps_py PYTHON COMMAND ARG...: runs the orb's Python helper (SCRIPT_PYTHON_SECURITY_PY,
+# src/scripts/lib/python_security.py) with PYTHON in isolated mode, so the
+# job's PYTHONPATH and the working directory's modules stay out of it.
+ps_py() {
+    local python=$1
+    shift
+    "${python}" -I -c "${SCRIPT_PYTHON_SECURITY_PY}" "$@"
+}
+
+# ps_helper_python: sets PS_PYTHON to the Python the helper runs on: the one
+# the orb's install exported in PYTHON_SECURITY_ORB_PYTHON, or else python3
+# on the PATH. Stops the step if neither runs.
+ps_helper_python() {
+    PS_PYTHON=${PYTHON_SECURITY_ORB_PYTHON:-}
+    if [[ -z "${PS_PYTHON}" || ! -x "${PS_PYTHON}" ]]; then
+        PS_PYTHON=$(command -v python3 || true)
+    fi
+    if [[ -z "${PS_PYTHON}" ]] || ! "${PS_PYTHON}" -I -c 'import sys; sys.exit(sys.version_info < (3, 8))' 2> /dev/null; then
+        echo "ERROR: This command needs Python 3.8 or newer: install it in an earlier step with this orb's install" >&2
+        echo "  (tools: python, or any tool), or use an image with python3." >&2
+        exit 1
+    fi
+}
+
+# ps_lock_line FILE NAME: the line of package NAME's entry in a lockfile or
+# requirements file, or 1, for SARIF.
+ps_lock_line() {
+    awk -v name="$2" '
+        BEGIN { want1 = "name = \"" name "\""; want2 = "\"" name "\": {" }
+        { line = $0; sub(/^[ \t]+/, "", line) }
+        line == want1 || line == want2 || tolower(line) ~ "^" name "(\\[[^]]*\\])?[ ]*==" { print NR; found = 1; exit }
+        END { if (!found) print 1 }' "$1" 2> /dev/null || echo 1
+}
+
+# ps_environment VALUE: sets PS_ENVIRONMENT to the interpreter of an
+# installed environment: VALUE itself, or VALUE/bin/python for the
+# environment's directory, made absolute without following links, since a
+# virtual environment's python is a link to the interpreter it was made with.
+ps_environment() {
+    local python=$1
+    if [[ -d "${python}" && -x "${python}/bin/python" ]]; then
+        python=${python%/}/bin/python
+    fi
+    if [[ -d "${python}" || ! -x "${python}" ]]; then
+        echo "ERROR: environment must be the Python interpreter of an installed environment, such as .venv/bin/python," >&2
+        echo "  or its directory, such as .venv; '$1' is not an executable file." >&2
+        exit 1
+    fi
+    if [[ "${python}" != /* ]]; then
+        python="$(cd "$(dirname "${python}")" && pwd)/${python##*/}"
+    fi
+    # shellcheck disable=SC2034 # read by the script that evals this file
+    PS_ENVIRONMENT=${python}
+}
+
+# ps_files PARAMETER: sets PS_FILES to the files PS_LIST names, each a path
+# or a glob relative to the working directory. A pattern that matches no
+# file fails the step: a typo would otherwise check nothing.
+ps_files() {
+    local pattern match matches
+    PS_FILES=()
+    for pattern in ${PS_LIST[@]+"${PS_LIST[@]}"}; do
+        matches=0
+        while IFS= read -r match; do
+            [[ -n "${match}" ]] || continue
+            PS_FILES+=("${match}")
+            matches=$((matches + 1))
+        done < <(compgen -G "${pattern}" | LC_ALL=C sort || true)
+        if [[ "${matches}" -eq 0 || ( "${pattern}" != *[*?[]* && ! -f "${pattern}" ) ]]; then
+            echo "ERROR: $1 names '${pattern}', but there is no such file in $(pwd)." >&2
+            exit 1
+        fi
+    done
+}
+
+# ps_run_record FILE COMMAND OUTCOME EXIT_CODE STARTED: writes a run record,
+# the JSON document schemas/run-record.v1.json describes, saying what exactly
+# this command checked, so a reviewer can tell without running it again. It
+# reads what the command set:
+#   PS_TOOL          the tool that ran, if any (the script install put on the PATH)
+#   PS_TOOL_VERSION  what it reports as its version
+#   PS_ARGS          the arguments it ran with, as an array
+#   PS_INPUTS        "role:path" entries, such as "lockfile:uv.lock"
+#   PS_REPORTS       the report files written
+#   PS_COUNTS        a JSON object of the command's counts
+#   PS_RESULTS       a JSON array of per-item results, such as one per input
+#   PS_TARGET_JSON   the environment checked, as JSON, if any
+# OUTCOME is passed, findings, findings-reported (findings with report_only)
+# or error.
+ps_run_record() {
+    local file=$1 entry path role sha inputs="[]" reports="[]" args
+    for entry in ${PS_INPUTS[@]+"${PS_INPUTS[@]}"}; do
+        role=${entry%%:*}
+        path=${entry#*:}
+        sha=""
+        if [[ -f "${path}" ]]; then
+            sha=$(ps_sha256 "${path}")
+        fi
+        if [[ -d "$(dirname "${path}")" ]]; then
+            path=$(cd "$(dirname "${path}")" && pwd)/${path##*/}
+        fi
+        inputs=$(jq -c --arg role "${role}" --arg path "${path}" --arg sha "${sha}" \
+            '. + [{role: $role, path: $path, sha256: (if $sha == "" then null else $sha end)}]' <<< "${inputs}")
+    done
+    for path in ${PS_REPORTS[@]+"${PS_REPORTS[@]}"}; do
+        if [[ -f "${path}" ]]; then
+            reports=$(jq -c --arg path "${path}" --arg sha "$(ps_sha256 "${path}")" '. + [{path: $path, sha256: $sha}]' <<< "${reports}")
+        fi
+    done
+    args=$(ps_args_json ${PS_ARGS[@]+"${PS_ARGS[@]}"})
+    if ! jq -n --arg command "$2" --arg outcome "$3" --argjson code "$4" --arg started "$5" \
+        --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cwd "$(pwd)" --argjson ci "$(ps_ci_json)" \
+        --argjson tool "$(if [[ -n "${PS_TOOL:-}" ]]; then ps_tool_json "${PS_TOOL}" "${PS_TOOL_VERSION:-}"; else echo null; fi)" \
+        --argjson target "${PS_TARGET_JSON:-null}" \
+        --argjson inputs "${inputs}" --argjson reports "${reports}" --argjson counts "${PS_COUNTS:-null}" \
+        --argjson results "${PS_RESULTS:-null}" --argjson args "${args}" '{
+            schema: "https://github.com/juburr/python-security-orb/blob/main/schemas/run-record.v1.json",
+            command: $command, outcome: $outcome, exit_code: $code,
+            started_at: $started, finished_at: $finished, ci: $ci, working_directory: $cwd,
+            tool: $tool, arguments: $args, target: $target,
+            inputs: $inputs, counts: $counts, results: $results, reports: $reports
+        }' > "${file}"; then
+        echo "WARN: Could not write the run record ${file}." >&2
+        return 0
+    fi
+    echo "Run record: ${file}"
+}

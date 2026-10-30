@@ -1,0 +1,139 @@
+description: >
+  Lists the license of every package installed in a Python environment with
+  pip-licenses, and checks each against allowed_licenses. A license is read
+  as an SPDX expression from clarify, then the package's License-Expression,
+  its License field when that names a license, then its license classifiers;
+  a package whose metadata names no license exactly counts as not allowed.
+  Writes the inventory as JSON (<report_name>.json and pip-licenses' own
+  <report_name>.pip-licenses.json), CSV and JUnit. Packages that aren't
+  allowed fail the step unless report_only is true; pip-licenses failing, or
+  leaving out a package the environment has, and an environment with nothing
+  to check fail it either way. Run install (tools: pip-licenses) first, and
+  install the project's dependencies into the environment.
+parameters:
+  working_dir:
+    type: string
+    default: "."
+    description: >
+      The directory to run in: environment is relative to it, and the
+      project named in its pyproject.toml is the project check_project
+      refers to.
+  environment:
+    type: string
+    default: ""
+    description: >
+      The installed environment to check, as its Python interpreter, such as
+      .venv/bin/python, or its directory, such as .venv. Empty checks .venv in
+      working_dir. Every distribution the interpreter sees is listed,
+      installers such as pip included. Environment variables are expanded.
+  allowed_licenses:
+    type: string
+    default: "Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,PSF-2.0"
+    description: >
+      The licenses packages may have, as SPDX identifiers separated by commas
+      or spaces, such as Apache-2.0,MIT,MPL-2.0 (certifi, which requests
+      needs, is MPL-2.0). An expression with OR needs one allowed side, with
+      AND every part; a license with an exception (WITH) needs its license
+      allowed. Identifiers that aren't SPDX, such as BSD, can be listed as a
+      package's metadata writes them. Matching ignores case. Environment
+      variables are expanded.
+  ignore:
+    type: string
+    default: ""
+    description: >
+      Packages whose license isn't checked, separated by commas or spaces, as
+      a name or name==version, such as your organization's own packages. They
+      stay in the inventory. Environment variables are expanded.
+  clarify:
+    type: string
+    default: ""
+    description: >
+      Licenses to use in place of what packages' metadata says, one
+      name[==version]=EXPRESSION per line, such as idna==2.7=BSD-3-Clause:
+      for a package whose metadata names no license exactly, such as one with
+      only the "BSD License" classifier. Lines starting with # are comments.
+      Environment variables are expanded.
+  check_project:
+    type: boolean
+    default: false
+    description: >
+      Also check the license of the project itself, the package that
+      working_dir's pyproject.toml names, when it is installed. It is always
+      in the inventory.
+  allow_empty:
+    type: boolean
+    default: false
+    description: >
+      Let a check pass that found no package to check. By default it fails,
+      since it checked nothing.
+  output_dir:
+    type: string
+    default: /tmp/python-security-reports
+    description: >
+      Absolute path of the directory to write the reports into. Environment
+      variables are not expanded, since the path is also passed to
+      store_artifacts and store_test_results.
+  report_name:
+    type: string
+    default: licenses
+    description: >
+      The reports' file name without its extension: <report_name>.json (the
+      orb's inventory and verdict), <report_name>.pip-licenses.json
+      (pip-licenses' own) and <report_name>.csv. Letters, digits, '.', '_'
+      and '-'.
+  junit:
+    type: boolean
+    default: true
+    description: >
+      Write the check as JUnit (output_dir/junit/<report_name>.xml), one case
+      per package, and store it with store_test_results for CircleCI's Tests
+      tab.
+  run_record:
+    type: boolean
+    default: false
+    description: >
+      Also write a run record (<report_name>.run-record.json): which
+      environment was checked, with which pip-licenses, and what it found.
+  report_only:
+    type: boolean
+    default: false
+    description: >
+      Report packages that aren't allowed without failing the step, to adopt
+      the check gradually. pip-licenses failing, or a check of nothing, still
+      fails it.
+  store_artifacts:
+    type: boolean
+    default: true
+    description: Store output_dir as job artifacts under python-security-reports/, including when the step fails.
+steps:
+  - run:
+      name: pip-licenses (<< parameters.report_name >>)
+      working_directory: << parameters.working_dir >>
+      environment:
+        PARAM_ALLOW_EMPTY: << parameters.allow_empty >>
+        PARAM_ALLOWED_LICENSES: << parameters.allowed_licenses >>
+        PARAM_CHECK_PROJECT: << parameters.check_project >>
+        PARAM_CLARIFY: << parameters.clarify >>
+        PARAM_ENVIRONMENT: << parameters.environment >>
+        PARAM_IGNORE: << parameters.ignore >>
+        PARAM_JUNIT: << parameters.junit >>
+        PARAM_OUTPUT_DIR: << parameters.output_dir >>
+        PARAM_REPORT_NAME: << parameters.report_name >>
+        PARAM_REPORT_ONLY: << parameters.report_only >>
+        PARAM_RUN_RECORD: << parameters.run_record >>
+        SCRIPT_PYTHON_SECURITY_LIB: << include(scripts/lib/python_security.sh) >>
+        SCRIPT_PYTHON_SECURITY_PY: << include(scripts/lib/python_security.py) >>
+      command: << include(scripts/licenses.sh) >>
+  - when:
+      condition: << parameters.junit >>
+      steps:
+        - store_test_results:
+            path: << parameters.output_dir >>/junit/<< parameters.report_name >>.xml
+            when: always
+  - when:
+      condition: << parameters.store_artifacts >>
+      steps:
+        - store_artifacts:
+            path: << parameters.output_dir >>
+            destination: python-security-reports
+            when: always

@@ -1,0 +1,12 @@
+{
+  "errors": [],
+  "generated_at": "2026-10-30T12:00:00Z",
+  "metrics": {
+    "_totals": {
+      "loc": 0,
+      "nosec": 0,
+      "skipped_tests": 0
+    }
+  },
+  "results": []
+}
