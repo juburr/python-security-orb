@@ -44,9 +44,11 @@ inputs:
       An installed environment whose files to check against the SHA-256 that each
       package's RECORD lists, as its Python interpreter, such as .venv/bin/python,
       or its directory, such as .venv: a changed or missing file is a finding, and
-      so is a .pth file no RECORD lists, which Python would run at startup. Nothing
-      in the environment runs during the check. Compiled .pyc files, which
-      installers write after RECORD, aren't checked.
+      so is a .pth file no RECORD lists, which Python would run at startup. With
+      include-system-site-packages, and for a system interpreter, the base
+      interpreter's and the user's site-packages are checked too. Nothing in the
+      environment runs during the check. Compiled .pyc files, which installers write
+      after RECORD, aren't checked.
     default: ""
   require_hashes:
     description: >

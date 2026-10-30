@@ -205,10 +205,11 @@ for ((i = 1; i <= n; i++)); do
         dir=$(dirname "${file}")
         code=0
         case "${tool}" in
-            uv) (cd "${dir}" && env -u UV_FROZEN -u UV_LOCKED uv lock --check) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
+            # Without the variables that would point it at another project.
+            uv) (cd "${dir}" && env -u UV_FROZEN -u UV_LOCKED -u UV_PROJECT -u UV_WORKING_DIR -u UV_WORKING_DIRECTORY uv lock --check) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
             poetry) (cd "${dir}" && poetry check --lock --no-interaction) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
             # pdm says whether the lockfile is up to date only with -v.
-            pdm) (cd "${dir}" && pdm lock --check -v) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
+            pdm) (cd "${dir}" && env -u PDM_PROJECT pdm lock --check -v) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
             pipenv) (cd "${dir}" && env -u PIPENV_PIPFILE pipenv verify) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
         esac
         # Poetry 1.6 to 1.8 say "not consistent", 1.x before and 2.x

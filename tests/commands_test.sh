@@ -221,7 +221,7 @@ fi
 printf '%s\n' "$@" > "${STUB_DIR}/${tool}.args"
 {
     pwd
-    env | grep -E '^(UV_FROZEN|UV_LOCKED|PIPENV_PIPFILE)=' || true
+    env | grep -E '^(UV_FROZEN|UV_LOCKED|UV_PROJECT|UV_WORKING_DIR|UV_WORKING_DIRECTORY|PDM_PROJECT|PIPENV_PIPFILE)=' || true
 } > "${STUB_DIR}/${tool}.env"
 state=${STUB_FRESH:-fresh}
 if [[ -n "${STUB_FRESH_FOR:-}" && "${STUB_FRESH_FOR}" != "${tool}" ]]; then
@@ -462,7 +462,7 @@ run audit requirements=requirements-loose.txt report_only=true
 check "an unpinned requirement can't be audited" rc_is 1
 check "saying why" said "  urllib3 : not pinned to one version (>=1.23)"
 check "a local editable package can't either, but needs no entry" said "Not audited, as local packages: ./libs/private (requirements-loose.txt)"
-check "an editable git package is a git source, not a local one" said "  shared : a git source (git+https://github.com/example/shared.git@main#egg=shared)"
+check "an editable git package is a git source, not a local one" said "  shared : a git source (git+https://github.com/example/shared.git@main)"
 run audit requirements=requirements-loose.txt report_only=true allow_skipped=urllib3,shared
 check "allow_skipped lets the rest through" rc_is 0
 cat > "${JOB}/pyproject.toml" << 'EOF'
@@ -805,16 +805,18 @@ echo "=== lock_verify"
 fixture vulnerable
 # pipenv checks Pipfile.lock against the Pipfile next to it.
 printf '[packages]\nrequests = "==2.19.1"\n' > "${JOB}/Pipfile"
-run lock_verify -- UV_FROZEN=1 UV_LOCKED=1 PIPENV_PIPFILE=/elsewhere/Pipfile
+run lock_verify -- UV_FROZEN=1 UV_LOCKED=1 UV_PROJECT=/elsewhere UV_WORKING_DIR=/elsewhere \
+    UV_WORKING_DIRECTORY=/elsewhere PDM_PROJECT=/elsewhere PIPENV_PIPFILE=/elsewhere/Pipfile
 check "pinned, hashed, up-to-date lockfiles pass" rc_is 0
 check "checking every lockfile in working_dir" said "Checking the lockfiles in ${JOB}: uv.lock poetry.lock pdm.lock Pipfile.lock pylock.toml"
 check "each with its kind and version" said "uv.lock (uv.lock 1): 6 packages, 0 findings, up to date (uv 9.9.9)"
 check "a pylock.toml has no package manager to ask" said "pylock.toml (pylock 1.0): 5 packages, 0 findings"
 check "uv checks uv.lock" args_have uv lock --check
-check "without the job's UV_FROZEN or UV_LOCKED" bash -c '! grep -q "^UV_" "$1"' _ "${STUB}/uv.env"
+check "without the job's UV_FROZEN, UV_LOCKED, UV_PROJECT or UV_WORKING_DIR" bash -c '! grep -q "^UV_" "$1"' _ "${STUB}/uv.env"
 check "in the lockfile's directory" grep -qx "${JOB}" "${STUB}/uv.env"
 check "poetry checks poetry.lock" args_have poetry check --lock --no-interaction
 check "pdm checks pdm.lock, verbosely to say so" args_have pdm lock --check -v
+check "without the job's PDM_PROJECT" bash -c '! grep -q "^PDM_PROJECT" "$1"' _ "${STUB}/pdm.env"
 check "pipenv checks Pipfile.lock" args_have pipenv verify
 check "next to its own Pipfile" bash -c '! grep -q "^PIPENV_PIPFILE" "$1"' _ "${STUB}/pipenv.env"
 check "passing" said "Passed: every package is pinned and hashed, and the lockfiles checked are up to date."
@@ -922,7 +924,7 @@ check "a host that starts with 127. isn't loopback" said "insecure-index: the in
 check "127.0.0.1 is" not_said "the index http://127.0.0.1:8080/simple is plain http"
 check "an index's credentials are never shown" not_said "hunter2"
 check "and kept out of the reports" bash -c '! grep -rq hunter2 "$1"' _ "${OUT}"
-check "a VCS URL without a name is named by its #egg=" said "unpinned-vcs: requests comes from git+https://github.com/psf/requests.git@main#egg=requests"
+check "a VCS URL without a name is named by its #egg=" said "unpinned-vcs: requests comes from git+https://github.com/psf/requests.git@main without"
 check "an archive URL without a name is checked too" said "unhashed: https://example.com/pkg-1.0.whl has no hash"
 cat > "${JOB}/Pipfile.lock" << 'EOF'
 {"_meta": {"pipfile-spec": 6, "hash": {"sha256": "x"},
@@ -1007,6 +1009,55 @@ run lock_verify environment="${PTH_VENV}"
 check "a .pth file no RECORD lists is a finding" said "record-unlisted: ${SITE}/evil.pth is in no package's RECORD"
 check "but not the one virtual environments come with" not_said "_virtualenv.pth is in no"
 check "and the check runs nothing in the environment" test ! -e "${WORK}/pth-ran"
+
+echo "=== lock_verify: requirements options, credentials and links"
+fixture ""
+printf 'requests>=2\n' > "${JOB}/deps.txt"
+printf 'six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274\n--no-index -rdeps.txt --extra-index=https://mirror.example.com/simple\n' > "${JOB}/requirements-top.txt"
+run lock_verify requirements=requirements-top.txt allowed_indexes=https://pypi.org/simple
+check "every option on an option line counts, an include after another option too" said "deps.txt:1: unpinned: requests is not pinned to one version (>=2)"
+check "and an abbreviated long option" said "index-not-allowed: the index https://mirror.example.com/simple is not in allowed_indexes"
+printf -- '--no-such-option\n' > "${JOB}/requirements-top.txt"
+run lock_verify requirements=requirements-top.txt
+check "an option pip doesn't know is refused, as pip refuses it" said "requirements-top.txt:1: no such option --no-such-option"
+printf -- '--no-index -r\n' > "${JOB}/requirements-top.txt"
+run lock_verify requirements=requirements-top.txt
+check "and so is an option without its value" said "requirements-top.txt:1: -r needs a value"
+printf 'demo @ git+https://user:review-secret@example.com/demo.git@main\n-e git+https://token-secret@example.com/tool.git@main#egg=tool\n--index-url https://user:index-secret@corp.example.com/simple?key=query-secret\nhttps://url-secret@example.com/pkg-1.0.whl\n' > "${JOB}/requirements-creds.txt"
+run lock_verify requirements=requirements-creds.txt report_only=true run_record=true
+check "a VCS URL's credentials are left out of the findings" said "unpinned-vcs: demo comes from git+https://example.com/demo.git@main without a full commit hash"
+check "and out of the output" script_lacks "secret"
+check "and out of every report" bash -c '! grep -rq secret "$1"' _ "${OUT}"
+fixture vulnerable
+printf 'requests==2.19.1\n-e git+https://token-secret@example.com/tool.git@main#egg=tool\n' > "${JOB}/requirements-creds.txt"
+run audit requirements=requirements-creds.txt report_only=true run_record=true
+check "audit's skip reasons leave the credentials out" said "a git source (git+https://example.com/tool.git@main)"
+check "and so do its output and reports" bash -c '! grep -q secret <<< "$1" && ! grep -rq secret "$2"' _ "${OUTPUT}" "${OUT}"
+fixture ""
+mkdir -p "${WORK}/external" "${JOB}/inside"
+ln -s ../external "${JOB}/dep"
+ln -s inside "${JOB}/alias"
+printf -- '-e ./dep\n-e ./alias\n' > "${JOB}/requirements.txt"
+run lock_verify requirements=requirements.txt
+check "a local path through a link out of the lockfile's directory is a local source" said "local-source: the path ./dep is outside the lockfile's directory"
+check "and one through a link that stays inside isn't" not_said "the path ./alias"
+
+echo "=== lock_verify: system site-packages"
+# site-dirs: the base interpreter's site-packages (and the user's) count when
+# a virtual environment includes them, after its own.
+HELPER="${ROOT}/src/scripts/lib/python_security.py"
+BASE_SITES=$(python3 -I -c 'import json, os, site; print(json.dumps([d for d in site.getsitepackages() + [site.getusersitepackages()] if os.path.isdir(d)]))')
+SYSTEM_VENV="${WORK}/system-venv"
+python3 -m venv --without-pip --system-site-packages "${SYSTEM_VENV}"
+"${SYSTEM_VENV}/bin/python" -I -S "${HELPER}" site-dirs > "${WORK}/system-site.json"
+check "a virtual environment with include-system-site-packages says so" jq -e '.system_site_packages' "${WORK}/system-site.json"
+check "and has the base interpreter's site-packages, after its own" jq -e --arg venv "${SYSTEM_VENV}" --argjson base "${BASE_SITES}" \
+    '(.site[0] | startswith($venv)) and ($base - .site) == []' "${WORK}/system-site.json"
+PLAIN_VENV="${WORK}/plain-venv"
+python3 -m venv --without-pip "${PLAIN_VENV}"
+"${PLAIN_VENV}/bin/python" -I -S "${HELPER}" site-dirs > "${WORK}/plain-site.json"
+check "one without them has only its own" jq -e --arg venv "${PLAIN_VENV}" \
+    '(.system_site_packages | not) and (.site | length) > 0 and all(.site[]; startswith($venv))' "${WORK}/plain-site.json"
 
 echo "=== lock_verify: installed files"
 VENV="${WORK}/record-venv"

@@ -83,6 +83,25 @@ def public(url):
     return re.sub(r"[?#].*$", "", url)
 
 
+def redact(value):
+    """A URL without credentials, query or fragment; any other value as it is.
+    Lock entries go into messages and reports, so their URLs never keep a
+    token."""
+    if isinstance(value, str) and re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+        return public(value)
+    return value
+
+
+def redact_lock(result):
+    for entry in result["packages"]:
+        for key in ("name", "location", "index"):
+            entry[key] = redact(entry.get(key))
+    result["indexes"] = [redact(index) for index in result["indexes"]]
+    for option in result["options"]:
+        option["value"] = redact(option.get("value"))
+    return result
+
+
 def classify_url(entry, url):
     """Sets a package's source from a URL: a VCS URL, a file: URL or an archive."""
     entry["location"] = url
@@ -327,6 +346,66 @@ REQUIREMENT = re.compile(
 )
 
 
+# The options pip reads in requirements files (SUPPORTED_OPTIONS and
+# SUPPORTED_OPTIONS_REQ in pip's req_file.py), and whether each takes a value.
+REQ_OPTIONS = {
+    "--index-url": True, "--extra-index-url": True, "--no-index": False, "--constraint": True,
+    "--requirement": True, "--editable": True, "--find-links": True, "--no-binary": True,
+    "--only-binary": True, "--prefer-binary": False, "--require-hashes": False, "--pre": False,
+    "--trusted-host": True, "--use-feature": True, "--global-option": True, "--hash": True,
+    "--config-settings": True,
+}
+REQ_SHORT = {"-i": "--index-url", "-c": "--constraint", "-r": "--requirement", "-e": "--editable", "-f": "--find-links"}
+
+
+def option_tokens(text, where):
+    """(option, value) for each option on a requirements option line, as
+    pip's optparse reads them: the whole line, split like a shell would,
+    long options abbreviated to any unique prefix, and a short option's value
+    attached or not. Words that aren't options are ignored, as pip does."""
+    import shlex
+    try:
+        tokens = shlex.split(text)
+    except ValueError as error:
+        raise Refused("%s: can't read the options '%s': %s" % (where, text, error))
+    found, index = [], 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token == "--":
+            break
+        if token.startswith("--"):
+            name, equals, value = token.partition("=")
+            matches = [option for option in REQ_OPTIONS if option == name] \
+                or [option for option in REQ_OPTIONS if option.startswith(name)]
+            if len(matches) != 1:
+                raise Refused("%s: %s option %s in '%s'" % (where, "no such" if not matches else "ambiguous", name, text))
+            name = matches[0]
+            if not REQ_OPTIONS[name]:
+                if equals:
+                    raise Refused("%s: %s takes no value, in '%s'" % (where, name, text))
+                found.append((name, None))
+                continue
+            if not equals:
+                if index >= len(tokens):
+                    raise Refused("%s: %s needs a value, in '%s'" % (where, name, text))
+                value = tokens[index]
+                index += 1
+            found.append((name, value))
+        elif token.startswith("-") and len(token) > 1:
+            name = REQ_SHORT.get(token[:2])
+            if not name:
+                raise Refused("%s: no such option %s in '%s'" % (where, token[:2], text))
+            value = token[2:]
+            if not value:
+                if index >= len(tokens):
+                    raise Refused("%s: %s needs a value, in '%s'" % (where, token[:2], text))
+                value = tokens[index]
+                index += 1
+            found.append((name, value))
+    return found
+
+
 def read_requirements(path, seen=None):
     """A pip requirements file: options, pins, hashes, -r includes."""
     seen = set() if seen is None else seen
@@ -363,33 +442,25 @@ def read_requirements(path, seen=None):
         if not line:
             continue
         if line.startswith("-"):
-            # As pip's optparse reads them: --long VALUE or --long=VALUE, and a
-            # short option's value attached or not (-rdeps.txt, -r deps.txt).
-            if line.startswith("--"):
-                match = re.match(r"^(--[A-Za-z-]+)(?:[=\s]+(\S+))?", line)
-            else:
-                match = re.match(r"^(-[A-Za-z])\s*(\S+)?", line)
-            if not match:
-                raise Refused("%s:%d: can't read the option '%s'" % (path, number, line))
-            option, value = match.group(1), match.group(2)
-            if option in ("-r", "--requirement") and value:
-                nested = read_requirements(os.path.join(base, value), seen)
-                for key in ("indexes", "packages", "options"):
-                    result[key].extend(nested[key])
-            elif option in ("-i", "--index-url", "--extra-index-url") and value:
-                result["indexes"].append(value)
-                result["options"].append({"option": option, "value": value, "line": number, "file": path})
-            elif option in ("-e", "--editable") and value:
-                name = re.search(r"#egg=([A-Za-z0-9._-]+)", value)
-                entry = package(name.group(1) if name else value, None, "editable", location=value, line=number)
-                if not name:
-                    entry["name"] = value
-                if URL_START.match(value):
-                    classify_url(entry, value)
-                entry["file"] = path
-                result["packages"].append(entry)
-            else:
-                result["options"].append({"option": option, "value": value, "line": number, "file": path})
+            for option, value in option_tokens(line, "%s:%d" % (path, number)):
+                if option == "--requirement":
+                    nested = read_requirements(os.path.join(base, value), seen)
+                    for key in ("indexes", "packages", "options"):
+                        result[key].extend(nested[key])
+                elif option in ("--index-url", "--extra-index-url"):
+                    result["indexes"].append(value)
+                    result["options"].append({"option": option, "value": value, "line": number, "file": path})
+                elif option == "--editable":
+                    name = re.search(r"#egg=([A-Za-z0-9._-]+)", value)
+                    entry = package(name.group(1) if name else value, None, "editable", location=value, line=number)
+                    if not name:
+                        entry["name"] = value
+                    if URL_START.match(value):
+                        classify_url(entry, value)
+                    entry["file"] = path
+                    result["packages"].append(entry)
+                else:
+                    result["options"].append({"option": option, "value": value, "line": number, "file": path})
             continue
         hashes = re.findall(r"--hash[=\s]+([A-Za-z0-9]+:[0-9A-Fa-f]+)", line)
         spec_text = re.sub(r"\s--hash[=\s]+\S+", "", " " + line).strip()
@@ -454,9 +525,10 @@ def read_lock(path, kind=None):
         raise Refused("%s is not a file" % path)
     result = READERS[kind](path)
     result.setdefault("options", [])
+    result.setdefault("indexes", [])
     result["path"] = path
     result["kind"] = kind
-    return result
+    return redact_lock(result)
 
 
 # --- pylock.toml for pip-audit ---
@@ -495,13 +567,19 @@ def loopback(url):
         return False
 
 
-def inside(location):
-    """Whether a local source's path stays in the lockfile's directory, so the
-    commit that holds the lockfile holds it too."""
+def inside(location, base):
+    """Whether a local source's path stays in the lockfile's directory (base),
+    so the commit that holds the lockfile holds it too. A symbolic link on the
+    path can lead out of it, to files no commit holds, so the path is
+    resolved."""
     path = (location or "").replace("\\", "/")
     if not path or path.startswith(("/", "file:", "~")) or re.match(r"^[A-Za-z]:", path):
         return False
-    return ".." not in path.split("/")
+    if ".." in path.split("/"):
+        return False
+    root = os.path.realpath(base or ".")
+    target = os.path.realpath(os.path.join(base or ".", path))
+    return target == root or target.startswith(os.path.join(root, ""))
 
 
 def lock_findings(lock, options):
@@ -528,7 +606,8 @@ def lock_findings(lock, options):
         if source in ("editable", "virtual", "directory", "path"):
             # The project, its workspace members and other paths in the
             # checkout come with the commit; a path outside it doesn't.
-            if inside(entry["location"]) or entry["name"] in allow_local:
+            if inside(entry["location"], os.path.dirname(entry.get("file") or lock["path"])) \
+                    or entry["name"] in allow_local:
                 continue
             if entry["name"] == entry["location"]:
                 message = "the path %s is outside the lockfile's directory" % entry["location"]
@@ -596,7 +675,7 @@ def lock_findings(lock, options):
         where = {"lockfile": option["file"], "line": option["line"]}
         if option["option"] == "--trusted-host":
             finding("trusted-host", "--trusted-host %s turns off TLS verification for that host" % option["value"], **where)
-        elif option["option"] in ("-f", "--find-links") and (option["value"] or "").startswith("http://") \
+        elif option["option"] == "--find-links" and (option["value"] or "").startswith("http://") \
                 and not loopback(option["value"]):
             finding("insecure-index", "--find-links %s finds packages over plain http" % public(option["value"]), **where)
         elif option["option"] == "verify_ssl":
@@ -623,7 +702,7 @@ def direct_source(dist):
         direct = None
     if not isinstance(direct, dict) or not direct.get("url"):
         return {"source": "registry"}
-    url = direct["url"]
+    url = redact(direct["url"])
     if "dir_info" in direct:
         return {"source": "editable" if (direct.get("dir_info") or {}).get("editable") else "directory", "location": url}
     if "vcs_info" in direct:
@@ -634,24 +713,35 @@ def direct_source(dist):
 
 
 def site_dirs():
-    """This interpreter's site-packages, found without running the site module
-    (python -S), which would run the .pth files in them: a virtual
-    environment's from beside its pyvenv.cfg, since under -S its sys.prefix
-    is the base interpreter's."""
+    """The site-packages this interpreter imports from, found without running
+    the site module (python -S), which would run the .pth files in them: a
+    virtual environment's from beside its pyvenv.cfg, since under -S its
+    sys.prefix is the base interpreter's, then, as the site module adds them
+    for a system interpreter or a virtual environment with
+    include-system-site-packages, the base interpreter's and the user's."""
+    import site
     root = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
-    venv = os.path.isfile(os.path.join(root, "pyvenv.cfg"))
+    config = os.path.join(root, "pyvenv.cfg")
+    venv = os.path.isfile(config)
+    system_site = not venv
+    dirs = []
     if venv:
         dirs = [os.path.join(root, lib, "python%d.%d" % sys.version_info[:2], "site-packages") for lib in ("lib", "lib64")]
-    else:
-        import site
-        dirs = site.getsitepackages()
+        with open(config, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                key, equals, value = line.partition("=")
+                if equals and key.strip().lower() == "include-system-site-packages":
+                    system_site = value.strip().lower() == "true"
+    if system_site:
+        dirs += site.getsitepackages() + [site.getusersitepackages()]
     seen, found = set(), []
     for directory in dirs:
         real = os.path.realpath(directory)
         if os.path.isdir(directory) and real not in seen:
             seen.add(real)
             found.append(directory)
-    return {"python": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "venv": venv, "site": found}
+    return {"python": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "venv": venv,
+            "system_site_packages": venv and system_site, "site": found}
 
 
 def installed(check_record, paths=None):
