@@ -3,3 +3,8 @@ name = "fixture-vulnerable"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = ["requests==2.19.1"]
+
+[tool.uv]
+# The date the lockfiles were resolved at, which uv.lock records, so uv lock
+# --check finds them up to date.
+exclude-newer = "2026-10-01T00:00:00Z"

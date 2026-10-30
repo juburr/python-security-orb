@@ -745,6 +745,8 @@ check "an environment that doesn't exist is refused" said "'${WORK}/nope' is not
 
 echo "=== lock_verify"
 fixture vulnerable
+# pipenv checks Pipfile.lock against the Pipfile next to it.
+printf '[packages]\nrequests = "==2.19.1"\n' > "${JOB}/Pipfile"
 run lock_verify -- UV_FROZEN=1 UV_LOCKED=1 PIPENV_PIPFILE=/elsewhere/Pipfile
 check "pinned, hashed, up-to-date lockfiles pass" rc_is 0
 check "checking every lockfile in working_dir" said "Checking the lockfiles in ${JOB}: uv.lock poetry.lock pdm.lock Pipfile.lock pylock.toml"
@@ -775,6 +777,15 @@ check "a manager that can't complete its check fails the step, report_only or no
 check "saying there is no verdict" said "Whether 1 lockfile is up to date is unknown, so there is no verdict:"
 check "naming it" said "pdm.lock: pdm could not check it (exit code 2); its output is above."
 check "with its output" said 'No `pyproject.toml` found'
+rm "${JOB}/pyproject.toml" "${JOB}/Pipfile"
+run lock_verify lockfiles=uv.lock
+check "a lockfile without its pyproject.toml can't be checked" said "freshness not checked: there is no pyproject.toml next to it"
+check "so uv doesn't run" not_run uv
+run lock_verify lockfiles=Pipfile.lock
+check "a Pipfile.lock without its Pipfile can't either" said "Pipfile.lock (Pipfile.lock 6): 5 packages, 0 findings, freshness not checked: there is no Pipfile next to it"
+run lock_verify freshness=require
+check "which fails the step with freshness: require" said "uv.lock: there is no pyproject.toml next to it, and freshness is require."
+fixture vulnerable
 run lock_verify freshness=skip
 check "freshness: skip runs no package manager" not_run uv
 check "and says so" said "uv.lock (uv.lock 1): 6 packages, 0 findings, freshness not checked (freshness: skip)"

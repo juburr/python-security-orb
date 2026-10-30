@@ -1,0 +1,32 @@
+description: >
+  Install the tools from a private package index, such as an Artifactory or
+  Nexus PyPI remote, and CPython and uv from mirrors, for networks that
+  can't reach PyPI, GitHub or Astral. The locks pin every file by SHA-256,
+  so a mirror can only serve the exact files PyPI published. Then audit
+  with a self-hosted OSV API, and let lock_verify accept only the private
+  index in the lockfiles.
+
+usage:
+  version: 2.1
+  orbs:
+    python-security: juburr/python-security-orb@0.1.0
+  jobs:
+    audit:
+      docker:
+        - image: cimg/base:current
+      steps:
+        - checkout
+        - python-security/install:
+            tools: pip-audit
+            index_url: https://artifactory.example.com/api/pypi/pypi-remote/simple
+            python_install_mirror: https://artifactory.example.com/artifactory/python-build-standalone
+            download_base_url: https://artifactory.example.com/artifactory/github-releases
+        - python-security/lock_verify:
+            allowed_indexes: https://artifactory.example.com/api/pypi/pypi-remote/simple
+        - python-security/audit:
+            service: osv
+            osv_url: https://osv.example.com/v1/query
+  workflows:
+    audit:
+      jobs:
+        - audit

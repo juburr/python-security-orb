@@ -348,6 +348,10 @@ run install_pip_audit install_path="${WORK}/elsewhere" -- STUB_TOOL=pip-audit
 check "another install_path with uv in it" rc_is 0
 check "gets the script" test -x "${WORK}/elsewhere/pip-audit"
 check "and goes on the PATH" grep -q "^export PATH=${WORK}/elsewhere:" "${WORK}/bash_env"
+mkdir -p "${HOME_DIR}/tools"
+cp "${STUB}/uv" "${HOME_DIR}/tools/uv"
+run install_pip_audit "install_path=~/tools" -- STUB_TOOL=pip-audit
+check "a leading ~ in install_path is the home directory, as install_uv reads it" test -x "${HOME_DIR}/tools/pip-audit"
 run install_pip_audit -- STUB_TOOL=pip-audit PATH="${BIN}:${WORK}/path:${PATH}"
 check "an install_path already on the PATH isn't added again" bash -c '! grep -q "^export PATH=" "$1"' _ "${WORK}/bash_env"
 

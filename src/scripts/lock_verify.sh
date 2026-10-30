@@ -185,11 +185,18 @@ for ((i = 1; i <= n; i++)); do
     status=none
     message=""
     version=""
+    manifest=pyproject.toml
+    if [[ "${tool}" == pipenv ]]; then
+        manifest=Pipfile
+    fi
     if [[ -n "${tool}" && "${FRESHNESS}" == skip ]]; then
         status=skipped
-    elif [[ -n "${tool}" ]] && ! command -v "${tool}" > /dev/null 2>&1; then
+    elif [[ -n "${tool}" ]] && { ! command -v "${tool}" > /dev/null 2>&1 || [[ ! -f "$(dirname "${file}")/${manifest}" ]]; }; then
         status=not-checked
         message="${tool} is not on the PATH"
+        if [[ ! -f "$(dirname "${file}")/${manifest}" ]]; then
+            message="there is no ${manifest} next to it"
+        fi
         if [[ "${FRESHNESS}" == require ]]; then
             FRESH_ERRORS+=("${file}: ${message}, and freshness is require.")
         fi

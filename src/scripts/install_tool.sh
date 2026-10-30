@@ -7,11 +7,11 @@
 #   1. Python: a CPython that uv downloads and checks against the SHA-256 it
 #      carries for each build (python: 3.10 to 3.14), or the executor's own
 #      (system, or a path).
-#   2. A new virtual environment on it, into which uv installs the tool's lock
-#      from PS_LOCKS (src/install/<tool>/locks.txt) with --require-hashes:
-#      every file is checked against the SHA-256 the lock pins, and a package
-#      the lock doesn't pin fails the install. Wheels only, so no build code
-#      runs.
+#   2. A new virtual environment on it, into which uv installs the tool's
+#      lock from SCRIPT_TOOL_LOCKS (src/install/<tool>/locks.txt) with
+#      --require-hashes: every file is checked against the SHA-256 the lock
+#      pins, and a package the lock doesn't pin fails the install. Wheels
+#      only, so no build code runs.
 #   3. A smoke test, then the environment replaces any earlier one, and a
 #      small script in install_path runs the tool in it with python -I, so a
 #      job's PYTHONPATH or a project's own packages can't reach it.
@@ -90,6 +90,10 @@ if [[ -n "${MIRROR}" ]]; then
     ps_mirror python_install_mirror "${MIRROR}" 'https|file'
 fi
 INSTALL_DIR=${INSTALL_DIR:-${ORB_HOME}/bin}
+# A leading ~ is the home directory, as install_uv reads it.
+if [[ "${INSTALL_DIR}" == \~ || "${INSTALL_DIR}" == \~/* ]]; then
+    INSTALL_DIR="${HOME:-}${INSTALL_DIR:1}"
+fi
 INSTALL_DIR=${INSTALL_DIR%/}
 if [[ "${INSTALL_DIR}" != /* || "${INSTALL_DIR}" == *$'\n'* ]]; then
     echo "ERROR: install_path must be an absolute path, not '${INSTALL_DIR}'." >&2
@@ -106,8 +110,8 @@ REQUIREMENTS=""
 VERIFIED=false
 if [[ -n "${MODULE}" ]]; then
     LOCK=$(awk -v start="# >>> ${TOOL} ${VERSION} >>>" -v end="# <<< ${TOOL} ${VERSION} <<<" '
-        $0 == start { on = 1; next } $0 == end { on = 0 } on' <<< "${PS_LOCKS:-}")
-    LISTED=$(sed -n "s/^# >>> ${TOOL} \\([^ ]*\\) >>>\$/\\1/p" <<< "${PS_LOCKS:-}" | tr '\n' ' ')
+        $0 == start { on = 1; next } $0 == end { on = 0 } on' <<< "${SCRIPT_TOOL_LOCKS:-}")
+    LISTED=$(sed -n "s/^# >>> ${TOOL} \\([^ ]*\\) >>>\$/\\1/p" <<< "${SCRIPT_TOOL_LOCKS:-}" | tr '\n' ' ')
     if [[ -n "${LOCK}" && "${VERIFY}" != false ]]; then
         VERIFIED=true
     elif [[ "${VERIFY}" == strict ]]; then

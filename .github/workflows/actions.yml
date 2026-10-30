@@ -1,0 +1,295 @@
+# Tests the GitHub Actions in actions/ on GitHub's own runners, as
+# .circleci/test-deploy.yml tests the orb's commands on CircleCI. Each job
+# runs the actions from this checkout (uses: ./actions/...), so a pull
+# request tests its own changes.
+name: GitHub Actions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REPORTS: /tmp/python-security-reports
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the offline tests
+        run: |
+          for test in tests/*_test.sh; do
+            echo "=== ${test}"
+            bash "${test}"
+          done
+
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/install
+        with:
+          tools: python,pip-audit,bandit,pip-licenses
+      - name: Verify the installs
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -x
+          version=$(uv --version | cut -d' ' -f2)
+          expected=$(grep -F "[\"${version}/${ARCH}\"]" src/install/uv/install.sh | cut -d'"' -f4)
+          [[ "$(sha512sum "$(command -v uv)" | cut -d' ' -f1)" == "${expected}" ]]
+          "${PYTHON_SECURITY_ORB_PYTHON}" --version | grep -q '^Python 3\.14\.'
+          pip-audit --version
+          bandit --version
+          pip-licenses --version
+          for tool in pip-audit bandit pip-licenses; do
+            jq -e '.verified == true' "${HOME}/.python-security-orb/bin/.${tool}.install.json"
+          done
+      - uses: ./actions/install_bandit
+        with:
+          python: "3.10"
+          install_path: ~/bandit-3.10
+      - name: Verify the oldest Python the locks cover installs
+        run: |
+          ~/bandit-3.10/bandit --version | grep -q 'python version = 3\.10\.'
+      - id: unlisted
+        uses: ./actions/install_pip_audit
+        continue-on-error: true
+        with:
+          version: 2.9.0
+          install_uv: "false"
+          install_path: ~/unlisted
+      - name: Verify an unlisted release fails closed
+        env:
+          UNLISTED: ${{ steps.unlisted.outcome }}
+        run: |
+          [[ "${UNLISTED}" == "failure" ]]
+          [[ ! -e ~/unlisted/pip-audit ]]
+
+  # With uv's and Python's download hosts blocked, uv and Python must come
+  # from the caches the install job saved. The tools still come from PyPI.
+  install-from-cache:
+    needs: install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Block the download hosts
+        run: |
+          echo "127.0.0.1 github.com objects.githubusercontent.com release-assets.githubusercontent.com releases.astral.sh" | sudo tee -a /etc/hosts
+          for host in github.com releases.astral.sh; do
+            if curl -sSf --max-time 10 -o /dev/null "https://${host}"; then
+              echo "${host} is still reachable."
+              exit 1
+            fi
+          done
+      - uses: ./actions/install
+        with:
+          tools: python,pip-audit
+      - name: Verify the install
+        run: |
+          pip-audit --version
+          "${PYTHON_SECURITY_ORB_PYTHON}" --version
+
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/install
+        with:
+          tools: pip-audit
+      - uses: ./actions/audit
+        with:
+          working_dir: tests/fixtures/clean
+          report_name: audit-clean
+          run_record: "true"
+      - uses: ./actions/audit
+        with:
+          working_dir: tests/fixtures/vulnerable
+          report_name: audit-vulnerable
+          run_record: "true"
+          report_only: "true"
+      - id: fails
+        uses: ./actions/audit
+        continue-on-error: true
+        with:
+          working_dir: tests/fixtures/vulnerable
+          report_name: audit-fails
+          store_artifacts: "false"
+      - name: Check what the audits found
+        env:
+          FAILS: ${{ steps.fails.outcome }}
+        run: |
+          set -x
+          [[ "${FAILS}" == "failure" ]]
+          jq -e '.findings == [] and (.inputs | length) == 5' "${REPORTS}/audit-clean.json"
+          jq -e '[.findings[] | select(.package == "requests") | .id, .aliases[]] | index("CVE-2018-18074") != null' \
+            "${REPORTS}/audit-vulnerable.json"
+      - name: Validate the reports
+        run: bash tests/validate_reports.sh
+
+  bandit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/install
+        with:
+          tools: bandit
+      - uses: ./actions/bandit
+        with:
+          working_dir: tests/fixtures/clean
+          report_name: bandit-clean
+          run_record: "true"
+      - uses: ./actions/bandit
+        with:
+          working_dir: tests/fixtures/vulnerable
+          report_name: bandit-vulnerable
+          require_suppression_reasons: "true"
+          report_only: "true"
+      - id: fails
+        uses: ./actions/bandit
+        continue-on-error: true
+        with:
+          working_dir: tests/fixtures/vulnerable
+          report_name: bandit-fails
+          store_artifacts: "false"
+      - name: Check what Bandit found
+        env:
+          FAILS: ${{ steps.fails.outcome }}
+        run: |
+          set -x
+          [[ "${FAILS}" == "failure" ]]
+          jq -e '[.results[].test_id] | sort == ["B324", "B602"]' "${REPORTS}/bandit-vulnerable.json"
+          jq -e '[.[] | [.test_id, .reason]] == [["B301", ""], ["B108", "a fixed path in a test fixture"]]' \
+            "${REPORTS}/bandit-vulnerable.suppressed.json"
+      - name: Validate the reports
+        run: bash tests/validate_reports.sh
+
+  licenses:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/install
+        with:
+          tools: pip-licenses
+      - name: Install the vulnerable fixture's dependencies into a virtual environment
+        run: |
+          cp -R tests/fixtures/vulnerable "${RUNNER_TEMP}/project"
+          cd "${RUNNER_TEMP}/project"
+          uv venv --no-config --python "${PYTHON_SECURITY_ORB_PYTHON}" .venv
+          uv pip install --no-config --python .venv/bin/python --require-hashes --no-deps -r requirements.txt
+      - uses: ./actions/licenses
+        with:
+          working_dir: ${{ runner.temp }}/project
+          report_name: licenses-default
+          run_record: "true"
+          report_only: "true"
+      - uses: ./actions/licenses
+        with:
+          working_dir: ${{ runner.temp }}/project
+          report_name: licenses-allowed
+          allowed_licenses: Apache-2.0 MIT MPL-2.0 BSD-3-Clause LGPL-2.1-or-later
+          clarify: |
+            idna==2.7=BSD-3-Clause
+            chardet==3.0.4=LGPL-2.1-or-later
+      - id: fails
+        uses: ./actions/licenses
+        continue-on-error: true
+        with:
+          working_dir: ${{ runner.temp }}/project
+          report_name: licenses-fails
+          store_artifacts: "false"
+      - uses: ./actions/lock_verify
+        with:
+          working_dir: ${{ runner.temp }}/project
+          lockfiles: uv.lock
+          environment: .venv
+          report_name: lock-environment
+      - name: Check the inventory
+        env:
+          FAILS: ${{ steps.fails.outcome }}
+        run: |
+          set -x
+          [[ "${FAILS}" == "failure" ]]
+          jq -e '[.packages[].name] | sort == ["certifi", "chardet", "idna", "requests", "urllib3"]' "${REPORTS}/licenses-default.json"
+          jq -e '[.findings[].name] | index("certifi") != null' "${REPORTS}/licenses-default.json"
+      - name: Validate the reports
+        run: bash tests/validate_reports.sh
+
+  lock-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/install
+        with:
+          tools: python
+      - uses: ./actions/lock_verify
+        with:
+          working_dir: tests/fixtures/clean
+          lockfiles: uv.lock pylock.toml
+          requirements: requirements.txt
+          report_name: lock-clean
+          run_record: "true"
+      - uses: ./actions/lock_verify
+        with:
+          working_dir: tests/fixtures/loose
+          requirements: requirements.txt
+          report_name: lock-loose
+          report_only: "true"
+      - name: Make a stale uv.lock
+        run: |
+          cp -R tests/fixtures/clean "${RUNNER_TEMP}/stale"
+          sed -i 's/six==1.17.0/six==1.16.0/' "${RUNNER_TEMP}/stale/pyproject.toml"
+      - id: stale
+        uses: ./actions/lock_verify
+        continue-on-error: true
+        with:
+          working_dir: ${{ runner.temp }}/stale
+          lockfiles: uv.lock
+          report_name: lock-stale
+      - name: Check what lock_verify found
+        env:
+          STALE: ${{ steps.stale.outcome }}
+        run: |
+          set -x
+          [[ "${STALE}" == "failure" ]]
+          jq -e '[.findings[].kind] == ["stale"]' "${REPORTS}/lock-stale.json"
+          jq -e '.inputs[] | select(.kind == "uv.lock") | .freshness.status == "fresh"' "${REPORTS}/lock-clean.json"
+          jq -e '.findings | length == 7' "${REPORTS}/lock-loose.json"
+      - name: Validate the reports
+        run: bash tests/validate_reports.sh

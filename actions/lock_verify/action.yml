@@ -1,0 +1,161 @@
+name: Verify Python lockfiles
+description: >
+  Checks that a project's lockfiles pin what gets installed: every package
+  pinned to one version and hashed with SHA-256 or stronger, git sources at a
+  full commit, no local path outside the lockfile's directory, https indexes
+  only, no --trusted-host, and optionally only allowed_indexes and releases
+  older than min_release_age_days. It reads uv.lock, poetry.lock, pdm.lock,
+  Pipfile.lock, pylock.toml and requirements files, without installing or
+  resolving anything. Then it checks each lockfile is up to date with its
+  pyproject.toml with its package manager, when that is on the PATH (uv lock
+  --check, poetry check --lock, pdm lock --check, pipenv verify), and with
+  environment, every installed file against its RECORD hash. Writes JSON, SARIF
+  and JUnit reports. Findings fail the step unless report_only is true; a
+  lockfile that can't be read, a package manager that can't complete its check,
+  or a check of nothing fails it either way. Needs a Python 3.11 or newer, or
+  tomli, to read TOML lockfiles: run install (tools: python, or any tool) first
+  on images without one. The GitHub Actions twin of the orb's lock_verify
+  command.
+author: juburr
+
+inputs:
+  working_dir:
+    description: >
+      The directory to run in. lockfiles, requirements and environment are relative
+      to it.
+    default: .
+  lockfiles:
+    description: >
+      Lockfiles to check, separated by commas or spaces, as paths or globs: uv.lock,
+      poetry.lock (1.x and 2.x), pdm.lock (4.x), Pipfile.lock and PEP 751
+      pylock.toml files. Leave lockfiles, requirements and environment empty to
+      check every lockfile in working_dir. A path or glob that matches no file fails
+      the step.
+    default: ""
+  requirements:
+    description: >
+      Requirements files to check, separated by commas or spaces, as paths or globs,
+      such as uv pip compile --generate-hashes or pip-compile output; -r includes
+      are followed. pip installs them with --require-hashes only when every
+      requirement has a hash.
+    default: ""
+  environment:
+    description: >
+      An installed environment whose files to check against the SHA-256 that each
+      package's RECORD lists, as its Python interpreter, such as .venv/bin/python,
+      or its directory, such as .venv: a changed or missing file is a finding.
+      Compiled .pyc files, which installers write after RECORD, aren't checked.
+    default: ""
+  require_hashes:
+    description: >
+      Require a SHA-256 (or stronger) hash for every file a package can be installed
+      from. Set it to false for requirements files that only pin versions.
+    default: "true"
+  min_release_age_days:
+    description: >
+      Report a package release uploaded fewer than this many days ago, such as 7,
+      since most malicious releases are found and removed within days. It reads the
+      upload times uv.lock, poetry.lock, pdm.lock and pylock.toml record; 0 turns it
+      off.
+    default: "0"
+  allowed_indexes:
+    description: >
+      The package indexes a lockfile may use, as URLs separated by commas or spaces,
+      such as https://pypi.org/simple. Empty allows any https index, with a warning
+      when a lockfile uses more than one.
+    default: ""
+  allow_local:
+    description: >
+      Packages that may come from a local path outside the lockfile's directory,
+      separated by commas or spaces. The project, its workspace members and other
+      paths inside the lockfile's directory need no entry.
+    default: ""
+  freshness:
+    description: >
+      Whether to check each lockfile against its pyproject.toml (or Pipfile) with
+      its package manager: auto when the manager is on the PATH, require to fail
+      when it isn't, skip never. A stale lockfile is a finding. uv may contact the
+      package index while it checks.
+    default: auto
+  allow_empty:
+    description: >
+      Let a check pass that found no package to check. By default it fails, since it
+      checked nothing.
+    default: "false"
+  output_dir:
+    description: >
+      Absolute path of the directory to write the reports into.
+    default: /tmp/python-security-reports
+  report_name:
+    description: >
+      The reports' file name without its extension: <report_name>.json and
+      <report_name>.sarif. Letters, digits, '.', '_' and '-'.
+    default: lock-verify
+  junit:
+    description: >
+      Write the check as JUnit (output_dir/junit/<report_name>.xml), one case per
+      lockfile.
+    default: "true"
+  run_record:
+    description: >
+      Also write a run record (<report_name>.run-record.json): which inputs were
+      checked, with their SHA-256, which package managers checked them, and what it
+      found.
+    default: "false"
+  report_only:
+    description: >
+      Report findings without failing the step, to adopt the check gradually. A
+      lockfile that can't be read, a package manager that can't complete its check,
+      or a check of nothing still fails it.
+    default: "false"
+  store_artifacts:
+    description: >
+      Upload output_dir as a workflow artifact named
+      python-security-reports-<report_name>-<random>, including when the step fails.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Artifact names must be unique in a workflow run, and the same command
+    # can run in several jobs or matrix legs, so the name ends in a random
+    # suffix.
+    - name: Name the reports artifact
+      id: artifact
+      if: (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      shell: bash
+      env:
+        REPORT_NAME: ${{ inputs.report_name }}
+      run: |
+        if [[ ! "${REPORT_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            REPORT_NAME=reports
+        fi
+        printf 'name=python-security-reports-%s-%s\n' "${REPORT_NAME}" "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" >> "${GITHUB_OUTPUT}"
+    - name: lock_verify
+      shell: bash
+      working-directory: ${{ inputs.working_dir }}
+      env:
+        PARAM_ALLOWED_INDEXES: ${{ inputs.allowed_indexes }}
+        PARAM_ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        PARAM_ALLOW_LOCAL: ${{ inputs.allow_local }}
+        PARAM_ENVIRONMENT: ${{ inputs.environment }}
+        PARAM_FRESHNESS: ${{ inputs.freshness }}
+        PARAM_JUNIT: ${{ inputs.junit }}
+        PARAM_LOCKFILES: ${{ inputs.lockfiles }}
+        PARAM_MIN_RELEASE_AGE_DAYS: ${{ inputs.min_release_age_days }}
+        PARAM_OUTPUT_DIR: ${{ inputs.output_dir }}
+        PARAM_REPORT_NAME: ${{ inputs.report_name }}
+        PARAM_REPORT_ONLY: ${{ inputs.report_only }}
+        PARAM_REQUIREMENTS: ${{ inputs.requirements }}
+        PARAM_REQUIRE_HASHES: ${{ inputs.require_hashes }}
+        PARAM_RUN_RECORD: ${{ inputs.run_record }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/lock_verify.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_PYTHON_SECURITY_PY=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.py"
+    - name: Upload the reports
+      if: always() && (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.artifact.outputs.name }}
+        path: ${{ inputs.output_dir }}
+        if-no-files-found: ignore

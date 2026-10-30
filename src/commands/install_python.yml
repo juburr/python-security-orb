@@ -59,9 +59,9 @@ parameters:
     enum: ["false", "known_versions", "strict"]
     default: strict
     description: >
-      Verification of uv against this orb's checksum table, and. "strict"
-      (default) fails before downloading anything when uv's version has no
-      checksum. "known_versions" installs unlisted versions unverified, with a
+      Verification of uv against this orb's checksum table (Python is
+      checked by uv against the SHA-256 it carries). "strict" (default) fails
+      before downloading anything when uv's version has no checksum. "known_versions" installs unlisted versions unverified, with a
       warning. "false" skips verification and is not recommended.
 steps:
   - when:

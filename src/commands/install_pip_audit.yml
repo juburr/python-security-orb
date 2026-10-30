@@ -118,7 +118,7 @@ steps:
         PARAM_TOOL: pip-audit
         PARAM_VERIFY_CHECKSUMS: << parameters.verify_checksums >>
         PARAM_VERSION: << parameters.version >>
-        PS_LOCKS: << include(install/pip-audit/locks.txt) >>
+        SCRIPT_TOOL_LOCKS: << include(install/pip-audit/locks.txt) >>
         SCRIPT_PYTHON_SECURITY_LIB: << include(scripts/lib/python_security.sh) >>
       command: << include(scripts/install_tool.sh) >>
   - when:

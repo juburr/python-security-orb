@@ -1,0 +1,95 @@
+name: Install uv
+description: >
+  Installs uv, Astral's Python package manager, for Linux on amd64 or arm64,
+  picked from the machine's CPU architecture, after verifying its SHA-512
+  checksum. The tool install commands install pip-audit, Bandit and pip-licenses
+  with it, and run it first unless told it already ran. The static musl build
+  runs on any Linux, glibc or musl. The GitHub Actions twin of the orb's
+  install_uv command.
+author: juburr
+
+inputs:
+  caching:
+    description: >
+      Cache the downloaded release between jobs, keyed by version, CPU architecture
+      and home directory. Only verified releases are cached, and a cached release is
+      verified again before it is installed.
+    default: "true"
+  download_base_url:
+    description: >
+      Base URL of an internal mirror of GitHub releases, such as an Artifactory or
+      Nexus remote repository, to download from instead of https://github.com (and
+      Astral's own copy at releases.astral.sh). It replaces https://github.com in
+      the release URL, so the mirror must serve the same path. It must be an
+      https:// URL, without credentials (user:password@) or a query or fragment,
+      which would show in the log. What is downloaded is still verified against this
+      orb's checksum table.
+    default: ""
+  install_path:
+    description: >
+      Absolute path of the directory to install uv into. It is created if needed and
+      added to the PATH of later steps when it isn't already on it, and must be
+      writable without root. Defaults to $HOME/.python-security-orb/bin. The tool
+      install commands look for uv there and put their tools there too. Executor
+      images don't put that directory on the PATH, so it goes first, ahead of a uv
+      an image ships.
+    default: ""
+  verify_checksums:
+    description: >
+      SHA-512 verification against this orb's checksum table. "strict" (default)
+      fails before downloading anything when the version has no checksum in the
+      table. "known_versions" verifies listed versions and installs unlisted
+      versions unverified, with a warning. "false" skips verification and is not
+      recommended.
+    default: strict
+  version:
+    description: >
+      Version of uv to install, such as 0.13.6. A leading "v" is ignored, and
+      environment variables are expanded. The uv release also fixes the patch
+      release of the Python the tool install commands download, and the hash it is
+      checked against.
+    default: "0.13.6"
+
+runs:
+  using: composite
+  steps:
+    # The key is computed from a file that names the CPU (uname -m), HOME (a
+    # cache is restored to the absolute path it was saved from) and the
+    # version, as the orb's command computes it.
+    - name: Prepare uv cache key
+      id: uv-cache-key
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-uv-cache-key
+        PARAM_VERSION: ${{ inputs.version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/cache_key.sh"
+        # Bump the version in the key when an existing checksum table entry
+        # changes, so caches saved for the old bytes stop being restored.
+        printf 'key=python-security-orb-uv-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the uv cache
+      id: uv-restore
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
+    - name: Install uv
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_DOWNLOAD_BASE_URL: ${{ inputs.download_base_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.version }}
+      run: bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/install/uv/install.sh"
+    # A saved cache can't be replaced, so it is only saved when none was
+    # restored. Like the orb's save_cache, it is saved right after the
+    # install, not at the end of the job.
+    - name: Save the uv cache
+      if: (inputs.caching == 'true' || inputs.caching == '1') && steps.uv-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
