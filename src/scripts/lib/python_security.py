@@ -118,6 +118,15 @@ def classify_url(entry, url):
 URL_START = re.compile(r"^((git|hg|svn|bzr)\+|[A-Za-z][A-Za-z0-9+.-]*://|file:)")
 
 
+def url_hashes(url):
+    """The hash a direct URL carries in its fragment (#sha256=...), which pip
+    checks as it checks --hash: the first one, as pip's Link reads it."""
+    match = re.search(r"[#&](sha512|sha384|sha256|sha224|sha1|md5)=([^&]*)", url or "")
+    if match and re.fullmatch(r"[0-9A-Fa-f]+", match.group(2)):
+        return ["%s:%s" % (match.group(1), match.group(2))]
+    return []
+
+
 def package(name, version=None, source="registry", **extra):
     entry = {
         "name": canonical(name),
@@ -473,7 +482,7 @@ def read_requirements(path, seen=None):
                 entry["name"] = url
             classify_url(entry, url)
             entry["file"] = path
-            add_artifact(entry, hashes)
+            add_artifact(entry, hashes + url_hashes(url))
             result["packages"].append(entry)
             continue
         match = REQUIREMENT.match(spec_text)
@@ -490,6 +499,7 @@ def read_requirements(path, seen=None):
         entry["file"] = path
         if match.group("at"):
             classify_url(entry, match.group("url"))
+            hashes += url_hashes(match.group("url"))
         else:
             spec = (match.group("spec") or "").strip()
             pinned = re.fullmatch(r"===?\s*([A-Za-z0-9.+!_-]+)", spec)
@@ -745,27 +755,38 @@ def site_dirs():
 
 
 def installed(check_record, paths=None):
-    """The distributions on this interpreter's sys.path, or in paths, once each."""
+    """The distributions on this interpreter's sys.path, or in paths, once each.
+    With check_record, every copy's files are checked against its RECORD: a
+    package can be in more than one of the paths, such as a virtual
+    environment's and the system site-packages it includes."""
     from importlib import metadata
-    found, findings, warnings, recorded = {}, [], [], set()
+    found, findings, warnings, recorded, locations = {}, [], [], set(), set()
     for dist in (metadata.distributions(path=paths) if paths else metadata.distributions()):
         name = dist.metadata.get("Name")
         if not name:
             continue
+        location = str(getattr(dist, "_path", "") or "")
+        if location:
+            if os.path.realpath(location) in locations:
+                continue
+            locations.add(os.path.realpath(location))
         key = (canonical(name), dist.version)
-        if key in found:
-            continue
-        entry = {"name": key[0], "version": dist.version, "path": str(getattr(dist, "_path", "") or "")}
-        entry.update(direct_source(dist))
-        found[key] = entry
+        # The inventory lists the first copy, the one Python imports.
+        entry, where = found.get(key), ""
+        if entry is None:
+            entry = {"name": key[0], "version": dist.version, "path": location}
+            entry.update(direct_source(dist))
+            found[key] = entry
+        else:
+            where = " (another copy, in %s)" % os.path.dirname(location)
         if not check_record:
             continue
         # RECORD itself, since Distribution.files leaves out missing files
         # from Python 3.12 on.
         record = dist.read_text("RECORD")
         if record is None:
-            warnings.append("%s %s has no RECORD, so its files can't be checked" % key)
-            entry["files"] = None
+            warnings.append("%s %s has no RECORD, so its files can't be checked%s" % (key + (where,)))
+            entry.setdefault("files", None)
             continue
         checked = 0
         for row in csv.reader(record.splitlines()):
@@ -778,17 +799,17 @@ def installed(check_record, paths=None):
                 actual = record_hash(str(target), algorithm)
             except FileNotFoundError:
                 findings.append({"package": key[0], "version": key[1], "file": str(file), "kind": "missing",
-                                 "message": "%s %s: %s is missing" % (key[0], key[1], file)})
+                                 "message": "%s %s: %s is missing%s" % (key[0], key[1], file, where)})
                 continue
             except (OSError, ValueError) as error:
                 findings.append({"package": key[0], "version": key[1], "file": str(file), "kind": "unreadable",
-                                 "message": "%s %s: %s can't be read: %s" % (key[0], key[1], file, error)})
+                                 "message": "%s %s: %s can't be read: %s%s" % (key[0], key[1], file, error, where)})
                 continue
             checked += 1
             if actual != expected:
                 findings.append({"package": key[0], "version": key[1], "file": str(file), "kind": "modified",
-                                 "message": "%s %s: %s doesn't match its RECORD hash" % (key[0], key[1], file)})
-        entry["files"] = checked
+                                 "message": "%s %s: %s doesn't match its RECORD hash%s" % (key[0], key[1], file, where)})
+        entry["files"] = (entry.get("files") or 0) + checked
     # A .pth file runs at every start of the interpreter: one that no RECORD
     # lists was put there by something other than an installer. Virtual
     # environments made by virtualenv and uv have one of their own.

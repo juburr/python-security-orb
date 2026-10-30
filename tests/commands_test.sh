@@ -1017,6 +1017,11 @@ printf 'six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8
 run lock_verify requirements=requirements-top.txt allowed_indexes=https://pypi.org/simple
 check "every option on an option line counts, an include after another option too" said "deps.txt:1: unpinned: requests is not pinned to one version (>=2)"
 check "and an abbreviated long option" said "index-not-allowed: the index https://mirror.example.com/simple is not in allowed_indexes"
+HEX=4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+printf 'demo @ https://example.com/demo-1.0.tar.gz#sha256=%s\nhttps://example.com/pkg-1.0.whl#egg=pkg&sha256=%s\nold @ https://example.com/old-1.0.tar.gz#md5=0123456789abcdef0123456789abcdef\n' "${HEX}" "${HEX}" > "${JOB}/requirements-url-hash.txt"
+run lock_verify requirements=requirements-url-hash.txt report_only=true
+check "a direct URL's #sha256= fragment is its hash, as pip reads it" not_said "unhashed"
+check "and a weak one there is a weak hash" said "weak-hash: old lists md5 hashes"
 printf -- '--no-such-option\n' > "${JOB}/requirements-top.txt"
 run lock_verify requirements=requirements-top.txt
 check "an option pip doesn't know is refused, as pip refuses it" said "requirements-top.txt:1: no such option --no-such-option"
@@ -1083,6 +1088,18 @@ check "installed files that match their RECORD pass" rc_is 0
 check "saying what was checked" said "${VENV}/bin/python: 2 installed files of 1 package checked against their RECORD, 0 not matching"
 check "the run record names the environment" json_is lock-verify.run-record.json '[.inputs[].role]' '["environment"]'
 check "with no tool of its own" json_is lock-verify.run-record.json '.tool' 'null'
+# A second copy of the package, in another site-packages, with a changed file.
+SECOND_SITE="${WORK}/second-site"
+mkdir -p "${SECOND_SITE}"
+cp -R "${SITE}/tidy" "${SITE}/tidy-1.0.dist-info" "${SECOND_SITE}/"
+printf 'VALUE = 3\n' > "${SECOND_SITE}/tidy/__init__.py"
+python3 -I "${ROOT}/src/scripts/lib/python_security.py" installed --record --path "${SITE}" --path "${SECOND_SITE}" > "${WORK}/two-sites.json"
+check "every copy of a package is checked against its RECORD" jq -e --arg dir "${SECOND_SITE}" \
+    '.findings == [{package: "tidy", version: "1.0", file: "tidy/__init__.py", kind: "modified",
+      message: "tidy 1.0: tidy/__init__.py doesn\u0027t match its RECORD hash (another copy, in \($dir))"}]' "${WORK}/two-sites.json"
+check "and the inventory lists it once, with both copies' files" jq -e \
+    '[.packages[] | select(.name == "tidy") | .files] == [4]' "${WORK}/two-sites.json"
+rm -rf "${SECOND_SITE}"
 printf 'VALUE = 2\n' > "${SITE}/tidy/__init__.py"
 run lock_verify environment="${VENV}"
 check "a changed file fails the step" rc_is 1
