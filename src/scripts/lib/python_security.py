@@ -481,13 +481,17 @@ def option_tokens(text, where, shown=None):
     return found
 
 
-def read_requirements(path, seen=None):
-    """A pip requirements file: options, pins, hashes, -r includes."""
+def read_requirements(path, seen=None, constraint=False):
+    """A pip requirements file: options, pins, hashes, -r and -c includes.
+    pip applies a constraints file's options (indexes, --trusted-host) as a
+    requirements file's, but its packages only constrain versions and aren't
+    installed, so with constraint only its options are read, and those of the
+    files it includes."""
     seen = set() if seen is None else seen
     real = os.path.realpath(path)
-    if real in seen:
+    if (real, constraint) in seen:
         return {"lock_version": None, "indexes": [], "packages": [], "options": []}
-    seen.add(real)
+    seen.add((real, constraint))
     try:
         with open(path, "rb") as handle:
             data = handle.read()
@@ -534,12 +538,14 @@ def read_requirements(path, seen=None):
         where = "%s:%d" % (path, number)
         if line.startswith("-"):
             for option, value in option_tokens(line, where, shown):
-                if option in ("--requirement", "--editable"):
+                if option in ("--requirement", "--constraint") or (option == "--editable" and not constraint):
                     require_set(value, where, shown)
-                if option == "--requirement":
-                    nested = read_requirements(os.path.join(base, value), seen)
+                if option in ("--requirement", "--constraint"):
+                    nested = read_requirements(os.path.join(base, value), seen, constraint or option == "--constraint")
                     for key in ("indexes", "packages", "options"):
                         result[key].extend(nested[key])
+                elif option == "--editable" and constraint:
+                    continue
                 elif option in ("--index-url", "--extra-index-url"):
                     result["indexes"].append(value)
                     result["options"].append({"option": option, "value": value, "line": number, "file": path})
@@ -554,6 +560,8 @@ def read_requirements(path, seen=None):
                     result["packages"].append(entry)
                 else:
                     result["options"].append({"option": option, "value": value, "line": number, "file": path})
+            continue
+        if constraint:
             continue
         require_set(line, where, shown)
         hashes = re.findall(r"--hash[=\s]+([A-Za-z0-9]+:[0-9A-Fa-f]+)", line)

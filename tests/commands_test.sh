@@ -1033,6 +1033,17 @@ printf 'six (==1.17.0) --hash=sha256:%s\nsix[extra] ( >=1 ) --hash=sha256:%s\n' 
 run lock_verify requirements=requirements-parens.txt report_only=true
 check "a pin in parentheses is a pin, as PEP 508 allows" not_said "==1.17.0)"
 check "and a range in them is still unpinned" said "unpinned: six is not pinned to one version (>=1)"
+# A constraints file's options apply, as pip applies them; its packages
+# aren't installed.
+printf 'six==1.17.0 --hash=sha256:%s\n-c constraints.txt\n' "${HEX}" > "${JOB}/requirements-c.txt"
+printf -- '--index-url http://packages.example/simple\n--trusted-host packages.example\nrequests==2.19.1\n-r more-constraints.txt\n' > "${JOB}/constraints.txt"
+printf 'idna>=2\n--extra-index-url http://more.example/simple\n' > "${JOB}/more-constraints.txt"
+run lock_verify requirements=requirements-c.txt report_only=true
+check "a constraints file's index is checked" said "insecure-index: the index http://packages.example/simple is plain http"
+check "and its --trusted-host" said "trusted-host: --trusted-host packages.example turns off TLS verification"
+check "and those of the files it includes" said "insecure-index: the index http://more.example/simple is plain http"
+check "but its packages aren't taken for installed ones" not_said "requests"
+check "nor those of the files it includes" not_said "idna"
 # A byte order mark is the file's encoding, not part of its first line.
 printf '\xef\xbb\xbfrequests>=2\nsix==1.17.0 --hash=sha256:%s\n' "${HEX}" > "${JOB}/requirements-bom.txt"
 run lock_verify requirements=requirements-bom.txt report_only=true
