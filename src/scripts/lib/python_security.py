@@ -17,10 +17,13 @@ input can't be read, 2 for a usage error):
                                 (KIND "lock": a lockfile by its name)
     pylock IN.json OUT.toml     a minimal pylock.toml of the versioned packages
     lock-findings IN.json ...   lock_verify's static checks
-    installed [--record]        the distributions this interpreter sees,
-                                with --record their files against RECORD
+    installed [--record] [--path DIR]...
+                                the distributions this interpreter sees, or
+                                those in each DIR; with --record their files
+                                against RECORD
     licenses INVENTORY.json ... each package's license, and the policy
     project-name DIR            the project's name in DIR/pyproject.toml
+    site-dirs                   this interpreter's site-packages, run with -S
     nosec SUPPRESSED.json       the reason on the # nosec of each finding
 """
 
@@ -74,6 +77,28 @@ def kind_of(path):
     return "requirements"
 
 
+def public(url):
+    """URL without userinfo, query and fragment, for messages and comparisons."""
+    url = re.sub(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@", r"\1", url or "")
+    return re.sub(r"[?#].*$", "", url)
+
+
+def classify_url(entry, url):
+    """Sets a package's source from a URL: a VCS URL, a file: URL or an archive."""
+    entry["location"] = url
+    if re.match(r"^(git|hg|svn|bzr)\+", url):
+        entry["source"] = "git" if url.startswith("git+") else url.split("+", 1)[0]
+        commit = re.search(r"@([0-9a-f]{40,64})(?:#|$)", url)
+        entry["commit"] = commit.group(1) if commit else None
+    elif url.startswith("file:"):
+        entry["source"] = "path"
+    else:
+        entry["source"] = "url"
+
+
+URL_START = re.compile(r"^((git|hg|svn|bzr)\+|[A-Za-z][A-Za-z0-9+.-]*://|file:)")
+
+
 def package(name, version=None, source="registry", **extra):
     entry = {
         "name": canonical(name),
@@ -120,7 +145,9 @@ def read_uv(path):
             if "://" in source["registry"]:
                 indexes.add(source["registry"])
             else:
-                entry["source"] = "path"
+                # A flat index of local files (find-links): the packages are
+                # still released versions, audited by name and version.
+                entry["local_index"] = True
                 entry["location"] = source["registry"]
         elif "git" in source:
             entry["source"] = "git"
@@ -152,8 +179,13 @@ def read_poetry(path):
     if not lock_version.startswith(("1.", "2.")):
         raise Refused("%s has lock-version %r; this orb reads poetry.lock 1.x and 2.x" % (path, lock_version))
     packages, indexes = [], set()
+    # Lock-version 1.0 and 1.1 (Poetry 1.0 to 1.2) list each package's files
+    # in [metadata.files], by name, rather than with the package.
+    metadata_files = {canonical(k): v for k, v in (data.get("metadata", {}).get("files") or {}).items()}
     for raw in data.get("package", []):
         entry = package(raw["name"], raw.get("version"))
+        if "files" not in raw:
+            raw = dict(raw, files=metadata_files.get(canonical(raw["name"]), []))
         source = raw.get("source") or {}
         kind = source.get("type")
         if kind == "git":
@@ -222,6 +254,10 @@ def read_pipfile(path):
     sources = {s.get("name"): s for s in meta.get("sources", [])}
     indexes = sorted({s.get("url") for s in sources.values() if s.get("url")})
     packages = []
+    # pipenv installs from a source with verify_ssl false without checking
+    # its certificate, as --trusted-host does.
+    options = [{"option": "verify_ssl", "value": s.get("url"), "line": None, "file": path}
+               for s in sources.values() if s.get("url") and s.get("verify_ssl") is False]
     for group in ("default", "develop"):
         for name, raw in sorted(data.get(group, {}).items()):
             version = raw.get("version")
@@ -235,6 +271,8 @@ def read_pipfile(path):
                 entry["location"] = raw["git"]
                 commit = raw.get("ref") or ""
                 entry["commit"] = commit if re.fullmatch(r"[0-9a-f]{40,64}", commit) else None
+            elif raw.get("file") and URL_START.match(raw["file"]):
+                classify_url(entry, raw["file"])
             elif raw.get("path") or raw.get("file"):
                 entry["source"] = "editable" if raw.get("editable") else "path"
                 entry["location"] = raw.get("path") or raw.get("file")
@@ -247,7 +285,7 @@ def read_pipfile(path):
             entry["unhashed_artifacts"] = 0 if hashes else 1
             entry["hashes"] = list(hashes)
             packages.append(entry)
-    return {"lock_version": str(spec), "indexes": indexes, "packages": packages}
+    return {"lock_version": str(spec), "indexes": indexes, "packages": packages, "options": options}
 
 
 def read_pylock(path):
@@ -301,15 +339,20 @@ def read_requirements(path, seen=None):
             raw_lines = handle.read().split("\n")
     except OSError as error:
         raise Refused("can't read %s: %s" % (path, error.strerror))
-    # Joined continuation lines, each with the number of its first line.
+    # Joined continuation lines, each with the number of its first line, as
+    # pip's join_lines does: a comment line never continues, and ends a
+    # continuation.
     lines, buffer, start = [], "", None
     for number, line in enumerate(raw_lines, 1):
-        if start is None:
-            start = number
-        if line.endswith("\\"):
+        comment = re.match(r"(^|\s+)#", line)
+        if line.endswith("\\") and not comment:
+            if start is None:
+                start = number
             buffer += line[:-1] + " "
             continue
-        lines.append((start, buffer + line))
+        if start is None:
+            start = number
+        lines.append((start, buffer + (" " + line if comment else line)))
         buffer, start = "", None
     if buffer:
         lines.append((start, buffer))
@@ -332,6 +375,10 @@ def read_requirements(path, seen=None):
             elif option in ("-e", "--editable") and value:
                 name = re.search(r"#egg=([A-Za-z0-9._-]+)", value)
                 entry = package(name.group(1) if name else value, None, "editable", location=value, line=number)
+                if not name:
+                    entry["name"] = value
+                if URL_START.match(value):
+                    classify_url(entry, value)
                 entry["file"] = path
                 result["packages"].append(entry)
             else:
@@ -339,6 +386,18 @@ def read_requirements(path, seen=None):
             continue
         hashes = re.findall(r"--hash[=\s]+([A-Za-z0-9]+:[0-9A-Fa-f]+)", line)
         spec_text = re.sub(r"\s--hash[=\s]+\S+", "", " " + line).strip()
+        if URL_START.match(spec_text):
+            # A URL without "name @", named by its #egg= when it has one.
+            url = spec_text.split()[0]
+            name = re.search(r"#egg=([A-Za-z0-9._-]+)", url)
+            entry = package(name.group(1) if name else url, None, line=number)
+            if not name:
+                entry["name"] = url
+            classify_url(entry, url)
+            entry["file"] = path
+            add_artifact(entry, hashes)
+            result["packages"].append(entry)
+            continue
         match = REQUIREMENT.match(spec_text)
         if not match:
             # A path or URL without a name.
@@ -352,16 +411,7 @@ def read_requirements(path, seen=None):
         entry = package(match.group("name"), None, line=number, marker=match.group("marker"))
         entry["file"] = path
         if match.group("at"):
-            url = match.group("url")
-            if url.startswith(("git+", "hg+", "svn+", "bzr+")):
-                entry["source"] = "git" if url.startswith("git+") else url.split("+", 1)[0]
-                commit = re.search(r"@([0-9a-f]{40,64})(?:#|$)", url)
-                entry["commit"] = commit.group(1) if commit else None
-            elif url.startswith("file:"):
-                entry["source"] = "path"
-            else:
-                entry["source"] = "url"
-            entry["location"] = url
+            classify_url(entry, match.group("url"))
         else:
             spec = (match.group("spec") or "").strip()
             pinned = re.fullmatch(r"===?\s*([A-Za-z0-9.+!_-]+)", spec)
@@ -427,8 +477,15 @@ def write_pylock(entries, out):
 # --- lock_verify's static checks ---
 
 def loopback(url):
-    host = re.sub(r"^[a-z+]+://(?:[^@/]*@)?", "", url).split("/")[0].split(":")[0].strip("[]")
-    return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+    import ipaddress
+    match = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]*@)?(\[[^]]*\]|[^/:?#]*)", url)
+    host = match.group(1).strip("[]") if match else ""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def inside(location):
@@ -445,9 +502,9 @@ def lock_findings(lock, options):
     now = options["now"]
     min_age = options["min_release_age_days"]
     allow_local = {canonical(n) for n in options["allow_local"]}
-    allowed_indexes = [i.rstrip("/") for i in options["allowed_indexes"]]
+    allowed_indexes = [public(i).rstrip("/") for i in options["allowed_indexes"]]
     require_hashes = options.get("require_hashes", True)
-    findings, warnings = [], []
+    findings, warnings, no_age = [], [], []
 
     def finding(kind, message, entry=None, **where):
         item = {"kind": kind, "message": message, "lockfile": lock["path"]}
@@ -493,8 +550,8 @@ def lock_findings(lock, options):
         elif not strong:
             finding("weak-hash", "%s is hashed only with %s" % (label.strip(), ", ".join(sorted({h.split(":")[0] for h in entry["hashes"]}))), entry)
         if min_age > 0:
-            if not entry["upload_times"] and lock["kind"] in ("uv.lock", "pylock") and source == "registry":
-                warnings.append("%s %s: the lock records no upload time, so its age is unknown" % (lock["path"], label.strip()))
+            if not entry["upload_times"]:
+                no_age.append(label.strip())
             for stamp in entry["upload_times"]:
                 try:
                     uploaded = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
@@ -508,7 +565,14 @@ def lock_findings(lock, options):
                     finding("too-new", "%s was uploaded %s, %.1f days ago, less than min_release_age_days (%d)"
                             % (label.strip(), stamp, age, min_age), entry)
                     break
-    indexes = sorted(set(lock["indexes"]))
+    if no_age:
+        # poetry.lock, pdm.lock, Pipfile.lock and requirements files record no
+        # upload times.
+        warnings.append("%s records no upload time for %d of its packages (%s), so min_release_age_days can't check them"
+                        % (lock["path"], len(no_age), ", ".join(no_age[:5]) + (", ..." if len(no_age) > 5 else "")))
+    if lock["kind"] == "pdm.lock" and allowed_indexes:
+        warnings.append("%s doesn't record the indexes its packages came from, so allowed_indexes can't check it" % lock["path"])
+    indexes = sorted({public(i) for i in lock["indexes"]})
     for index in indexes:
         if index.startswith("http://") and not loopback(index):
             finding("insecure-index", "the index %s is plain http, so anyone on the path can change what it serves" % index,
@@ -522,8 +586,12 @@ def lock_findings(lock, options):
         where = {"lockfile": option["file"], "line": option["line"]}
         if option["option"] == "--trusted-host":
             finding("trusted-host", "--trusted-host %s turns off TLS verification for that host" % option["value"], **where)
-        elif option["option"] in ("-f", "--find-links") and (option["value"] or "").startswith("http://"):
-            finding("insecure-index", "--find-links %s finds packages over plain http" % option["value"], **where)
+        elif option["option"] in ("-f", "--find-links") and (option["value"] or "").startswith("http://") \
+                and not loopback(option["value"]):
+            finding("insecure-index", "--find-links %s finds packages over plain http" % public(option["value"]), **where)
+        elif option["option"] == "verify_ssl":
+            finding("trusted-host", "the source %s has verify_ssl = false, which turns off TLS verification for it"
+                    % public(option["value"]), lockfile=option["file"], index=public(option["value"]))
     return {"findings": findings, "warnings": warnings}
 
 
@@ -537,11 +605,50 @@ def record_hash(path, algorithm):
     return base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode("ascii")
 
 
-def installed(check_record):
-    """The distributions on this interpreter's sys.path, once each."""
+def direct_source(dist):
+    """A distribution's source from its direct_url.json (PEP 610), or registry."""
+    try:
+        direct = json.loads(dist.read_text("direct_url.json") or "null")
+    except ValueError:
+        direct = None
+    if not isinstance(direct, dict) or not direct.get("url"):
+        return {"source": "registry"}
+    url = direct["url"]
+    if "dir_info" in direct:
+        return {"source": "editable" if (direct.get("dir_info") or {}).get("editable") else "directory", "location": url}
+    if "vcs_info" in direct:
+        vcs = direct["vcs_info"] or {}
+        return {"source": "git" if vcs.get("vcs") == "git" else vcs.get("vcs", "vcs"), "location": url,
+                "commit": vcs.get("commit_id")}
+    return {"source": "path" if url.startswith("file:") else "url", "location": url}
+
+
+def site_dirs():
+    """This interpreter's site-packages, found without running the site module
+    (python -S), which would run the .pth files in them: a virtual
+    environment's from beside its pyvenv.cfg, since under -S its sys.prefix
+    is the base interpreter's."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+    venv = os.path.isfile(os.path.join(root, "pyvenv.cfg"))
+    if venv:
+        dirs = [os.path.join(root, lib, "python%d.%d" % sys.version_info[:2], "site-packages") for lib in ("lib", "lib64")]
+    else:
+        import site
+        dirs = site.getsitepackages()
+    seen, found = set(), []
+    for directory in dirs:
+        real = os.path.realpath(directory)
+        if os.path.isdir(directory) and real not in seen:
+            seen.add(real)
+            found.append(directory)
+    return {"python": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "venv": venv, "site": found}
+
+
+def installed(check_record, paths=None):
+    """The distributions on this interpreter's sys.path, or in paths, once each."""
     from importlib import metadata
-    found, findings, warnings = {}, [], []
-    for dist in metadata.distributions():
+    found, findings, warnings, recorded = {}, [], [], set()
+    for dist in (metadata.distributions(path=paths) if paths else metadata.distributions()):
         name = dist.metadata.get("Name")
         if not name:
             continue
@@ -549,6 +656,7 @@ def installed(check_record):
         if key in found:
             continue
         entry = {"name": key[0], "version": dist.version, "path": str(getattr(dist, "_path", "") or "")}
+        entry.update(direct_source(dist))
         found[key] = entry
         if not check_record:
             continue
@@ -565,6 +673,7 @@ def installed(check_record):
                 continue
             file, (algorithm, _, expected) = row[0], row[1].partition("=")
             target = dist.locate_file(file)
+            recorded.add(os.path.normpath(str(target)))
             try:
                 actual = record_hash(str(target), algorithm)
             except FileNotFoundError:
@@ -580,6 +689,24 @@ def installed(check_record):
                 findings.append({"package": key[0], "version": key[1], "file": str(file), "kind": "modified",
                                  "message": "%s %s: %s doesn't match its RECORD hash" % (key[0], key[1], file)})
         entry["files"] = checked
+    # A .pth file runs at every start of the interpreter: one that no RECORD
+    # lists was put there by something other than an installer. Virtual
+    # environments made by virtualenv and uv have one of their own.
+    for directory in (paths or []) if check_record else []:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            target = os.path.normpath(os.path.join(directory, name))
+            if not name.endswith(".pth") or target in recorded:
+                continue
+            if name == "_virtualenv.pth":
+                with open(target, encoding="utf-8", errors="replace") as handle:
+                    if handle.read().strip() == "import _virtualenv":
+                        continue
+            findings.append({"package": None, "version": None, "file": target, "kind": "unlisted",
+                             "message": "%s is in no package's RECORD, and Python runs it whenever it starts" % target})
     packages = sorted(found.values(), key=lambda e: (e["name"], e["version"]))
     return {"python": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "sys_path": sys.path,
             "packages": packages, "findings": findings, "warnings": warnings}
@@ -846,13 +973,16 @@ def main(argv):
             options["now"] = datetime.datetime.now(datetime.timezone.utc)
             result = lock_findings(lock, options)
         elif command == "installed":
-            result = installed("--record" in args)
+            paths = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--path"]
+            result = installed("--record" in args, paths)
         elif command == "licenses":
             with open(args[0], encoding="utf-8") as handle:
                 inventory = json.load(handle)
             if not isinstance(inventory, list):
                 raise Refused("the pip-licenses inventory is not a list")
             result = licenses(inventory, args[1], args[2], args[3], args[4])
+        elif command == "site-dirs":
+            result = site_dirs()
         elif command == "project-name":
             result = {"name": project_name(args[0])}
         elif command == "nosec":

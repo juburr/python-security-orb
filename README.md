@@ -212,7 +212,7 @@ A package whose metadata names no license exactly, such as one with only the "BS
     environment: .venv
 ```
 
-`min_release_age_days` reports releases uploaded more recently than that, since most malicious releases are found and removed within days; it reads the upload times uv.lock, poetry.lock, pdm.lock and pylock.toml record. `allowed_indexes` limits the indexes a lockfile may name. `environment` checks every installed file against the SHA-256 its RECORD lists. `freshness: require` fails when a lockfile's package manager isn't on the `PATH` to check it.
+`min_release_age_days` reports releases uploaded more recently than that, since most malicious releases are found and removed within days; it reads the upload times uv.lock and pylock.toml record, and warns about lockfiles that record none (poetry.lock, pdm.lock, Pipfile.lock, requirements files). `allowed_indexes` limits the indexes a lockfile may name. `environment` checks every installed file against the SHA-256 its RECORD lists, and reports a `.pth` file no RECORD lists, since Python runs those at startup; nothing in the environment runs while it checks. `freshness: require` fails when a lockfile's package manager isn't on the `PATH` to check it.
 
 ### Install From a Private Index
 

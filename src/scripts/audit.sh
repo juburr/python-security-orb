@@ -80,26 +80,39 @@ for id in ${IGNORE[@]+"${IGNORE[@]}"}; do
     fi
 done
 # Options the command sets itself, which would change what is audited or how
-# the report is read. A word after an option that takes a value is its value.
+# the report is read, also as argparse abbreviations (--ignore for
+# --ignore-vuln). Of the short options only -v (verbose) is left, since the
+# others decide what is audited (-d is --dry-run, which audits nothing). A
+# word after --cache-dir is its value.
+REFUSED=(--format --output --vulnerability-service --osv-url --ignore-vuln --requirement --locked --path --local --fix
+    --dry-run --strict --desc --aliases --progress-spinner --timeout --disable-pip --no-deps --require-hashes
+    --index-url --extra-index-url --skip-editable --version --help)
 value_next=false
 for word in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
     if [[ "${value_next}" == true ]]; then
         value_next=false
         continue
     fi
-    if [[ "${word}" == --cache-dir ]]; then
-        value_next=true
-        continue
-    fi
-    case "${word%%=*}" in
-        -f | --format | -o | --output | -s | --vulnerability-service | --osv-url | --ignore-vuln | -r | --requirement \
-            | --locked | --path | -l | --local | --fix | --dry-run | -S | --strict | --desc | --aliases \
-            | --progress-spinner | --timeout | --disable-pip | --no-deps | --require-hashes | --index-url \
-            | --extra-index-url | --skip-editable | --)
-            echo "ERROR: extra_args can't hold ${word%%=*}: the audit command sets it, or it would change what is audited." >&2
+    case "${word}" in
+        --)
+            echo "ERROR: extra_args can't hold --: what follows would be read as projects to audit." >&2
             exit 1
             ;;
-        -*) ;;
+        --*)
+            if ps_abbreviates "${word}" "${REFUSED[@]}"; then
+                echo "ERROR: extra_args can't hold ${word%%=*}: the audit command sets it, or it would change what is audited." >&2
+                exit 1
+            fi
+            if [[ "${word}" != *=* ]] && ps_abbreviates "${word}" --cache-dir; then
+                value_next=true
+            fi
+            ;;
+        -*)
+            if ! ps_match "${word}" '^-v+$'; then
+                echo "ERROR: extra_args can't hold ${word}: of pip-audit's short options only -v can be given." >&2
+                exit 1
+            fi
+            ;;
         *)
             echo "ERROR: extra_args can't hold '${word}': pip-audit would read it as a project to audit." >&2
             exit 1
@@ -191,7 +204,8 @@ if [[ -n "${ENVIRONMENT}" ]]; then
         error "Could not list the packages installed for ${ENVIRONMENT}."
     fi
     jq -c --arg path "${ENVIRONMENT}" '{path: $path, kind: "environment", lock_version: null, indexes: [], options: [],
-        packages: [.packages[] | {name, version, source: "registry", line: null}]}' "${WORK}/env.json" > "${WORK}/inputs/${n}.json"
+        packages: [.packages[] | {name, version, source: (.source // "registry"), location, commit, line: null}]}' \
+        "${WORK}/env.json" > "${WORK}/inputs/${n}.json"
     PS_INPUTS+=("environment:${ENVIRONMENT}")
     # shellcheck disable=SC2034 # read by ps_run_record
     PS_TARGET_JSON=$(jq -c '{python: .python, version: .version, packages: (.packages | length)}' "${WORK}/env.json")
@@ -239,6 +253,17 @@ if [[ "${AUDITED}" -gt 0 ]]; then
     if [[ "${STATUS}" -eq 1 && "${VULNS}" -eq 0 ]] || [[ "${STATUS}" -eq 0 && "${VULNS}" -gt 0 ]]; then
         error "pip-audit exited with ${STATUS}, but its report lists $(ps_plural "${VULNS}" vulnerability vulnerabilities), so there is no verdict."
     fi
+    # Every package pip-audit was given must be in its report, audited or
+    # skipped: a report without them (an option such as --dry-run) audited
+    # nothing.
+    # shellcheck disable=SC2016 # jq program, not shell
+    MISSING=$(jq -rn --slurpfile report "${REPORT}" --slurpfile audited "${WORK}/audited.json" '
+        def canon: ascii_downcase | gsub("[-_.]+"; "-");
+        ([$report[0].dependencies[].name | canon]) as $reported
+        | [$audited[0][].name | canon] | unique | map(select(IN($reported[]) | not)) | join(", ")')
+    if [[ -n "${MISSING}" ]]; then
+        error "pip-audit's report leaves out packages it was given, so there is no verdict: ${MISSING}."
+    fi
     cp "${REPORT}" "${PS_BASE}.pip-audit.json"
     PS_REPORTS+=("${PS_BASE}.pip-audit.json")
 else
@@ -254,11 +279,14 @@ ALLOW_JSON=$(jq -cn '[$ARGS.positional[] | ascii_downcase | gsub("[-_.]+"; "-")]
 jq -n --slurpfile report "${REPORT}" --slurpfile audited "${WORK}/audited.json" --slurpfile not_audited "${WORK}/not_audited.json" \
     --argjson ignore "${IGNORE_JSON}" --argjson allow "${ALLOW_JSON}" --arg service "${SERVICE}" '
     def canon: ascii_downcase | gsub("[-_.]+"; "-");
+    # pip-audit reports versions normalized (2018.04.16 as 2018.4.16).
+    def vnorm: split(".") | map(if test("^[0-9]+$") then tonumber | tostring else . end) | join(".");
     ($report[0].dependencies) as $deps
-    | ($audited[0] | group_by([.name, .version]) | map({key: "\(.[0].name)==\(.[0].version)", value: [.[].input] | unique}) | from_entries) as $inputs
-    | [$deps[] | select(.vulns) | {name: (.name | canon), version, inputs: ($inputs["\(.name | canon)==\(.version)"] // []),
-        vulns: [.vulns[] | . as $v | ([$ignore[] | . as $i | select(any(([$v.id] + ($v.aliases // []))[]; . == $i))] | first) as $hit
-            | $v + {ignored: ($hit != null), ignore_entry: $hit}]}] as $packages
+    | ($audited[0] | group_by([.name, (.version | vnorm)])
+        | map({key: "\(.[0].name)==\(.[0].version | vnorm)", value: [.[].input] | unique}) | from_entries) as $inputs
+    | [$deps[] | select(.vulns) | {name: (.name | canon), version, inputs: ($inputs["\(.name | canon)==\(.version | vnorm)"] // []),
+        vulns: [.vulns[] | . as $v | [$ignore[] | . as $i | select(any(([$v.id] + ($v.aliases // []))[]; . == $i))] as $hits
+            | $v + {ignored: ($hits | length > 0), ignore_entry: ($hits | first), ignore_entries: $hits}]}] as $packages
     | ([$deps[] | select(.skip_reason) | {name: (.name | canon), version: null, reason: .skip_reason, input: null, local: false}]
        + [$not_audited[0][] | select(.local | not)]) as $skips
     | {
@@ -267,7 +295,7 @@ jq -n --slurpfile report "${REPORT}" --slurpfile audited "${WORK}/audited.json" 
         findings: [$packages[] as $p | $p.vulns[] | select(.ignored | not) | {package: $p.name, version: $p.version,
             id, aliases, fix_versions, description, inputs: $p.inputs}],
         ignored: [$packages[] as $p | $p.vulns[] | select(.ignored) | {package: $p.name, version: $p.version, id, ignore_entry}],
-        unused_ignores: [$ignore[] as $i | select([$packages[].vulns[] | select(.ignore_entry == $i)] | length == 0) | $i],
+        unused_ignores: [$ignore[] as $i | select([$packages[].vulns[] | select(any(.ignore_entries[]; . == $i))] | length == 0) | $i],
         skipped: [$skips[] | . + {allowed: (.name | IN($allow[]))}],
         local: [$not_audited[0][] | select(.local)]
     }' > "${WORK}/summary.json"
@@ -299,8 +327,11 @@ while IFS=$'\t' read -r package input; do
     fi
     LOCATIONS=$(jq -c --arg p "${package}" --arg i "${input}" --argjson l "${line}" '. + [{package: $p, input: $i, line: $l}]' <<< "${LOCATIONS}")
 done < <(jq -r '.findings[] as $f | $f.inputs[] | [$f.package, .] | @tsv' "${WORK}/summary.json" | sort -u)
+# An installed environment is outside the checkout, so its findings are in the
+# JSON and JUnit reports only.
+ENVIRONMENT_INPUT=${ENVIRONMENT:-}
 # shellcheck disable=SC2016 # jq program, not shell
-jq --argjson locations "${LOCATIONS}" --arg version "${PS_TOOL_VERSION}" '{
+jq --argjson locations "${LOCATIONS}" --arg version "${PS_TOOL_VERSION}" --arg environment "${ENVIRONMENT_INPUT}" '{
     "$schema": "https://json.schemastore.org/sarif-2.1.0.json", version: "2.1.0",
     runs: [{
         tool: {driver: {name: "pip-audit", version: $version, informationUri: "https://github.com/pypa/pip-audit",
@@ -310,7 +341,7 @@ jq --argjson locations "${LOCATIONS}" --arg version "${PS_TOOL_VERSION}" '{
                 helpUri: "https://osv.dev/vulnerability/\(.id)",
                 help: {text: "Upgrade to a fixed version: \(if (.fix_versions | length) > 0 then (.fix_versions | join(", ")) else "none is known yet" end)."},
                 properties: {tags: (["security", "vulnerability"] + (.aliases // []))}}]}},
-        results: [.findings[] as $f | $f.inputs[] as $input
+        results: [.findings[] as $f | $f.inputs[] as $input | select($input != $environment)
             | ($locations | map(select(.package == $f.package and .input == $input)) | first // {line: 1}) as $loc
             | {ruleId: $f.id, level: "error",
                message: {text: "\($f.package) \($f.version) has \($f.id)\(if ($f.aliases | length) > 0 then " (" + ($f.aliases | join(", ")) + ")" else "" end). Fixed in: \(if ($f.fix_versions | length) > 0 then ($f.fix_versions | join(", ")) else "no release yet" end)."},

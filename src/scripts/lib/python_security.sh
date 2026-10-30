@@ -431,6 +431,20 @@ ps_helper_python() {
     fi
 }
 
+# ps_abbreviates WORD OPTION...: whether WORD, a long option as given (with
+# or without =VALUE), is one of OPTIONS or a prefix of one, which argparse
+# reads as that option.
+ps_abbreviates() {
+    local name=${1%%=*} option
+    shift
+    for option in "$@"; do
+        if [[ "${option}" == "${name}"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ps_lock_line FILE NAME: the line of package NAME's entry in a lockfile or
 # requirements file, or 1, for SARIF.
 ps_lock_line() {

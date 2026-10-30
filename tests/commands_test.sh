@@ -61,6 +61,7 @@ EOF
 #   STUB_AUDIT_EXIT   exit with this code after a traceback, writing no report
 #   STUB_SKIP         a package to report as not found on PyPI
 #   STUB_EXIT         exit with this code whatever the report says
+#   STUB_DRY_RUN      write a report that lists no package, as --dry-run does
 cat > "${WORK}/bin/pip-audit" << 'EOF'
 #!/usr/bin/env bash
 set +o errexit +o nounset +o pipefail +o xtrace
@@ -83,6 +84,10 @@ if [[ -n "${STUB_AUDIT_EXIT:-}" ]]; then
     echo "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='pypi.org', port=443)"
     exit "${STUB_AUDIT_EXIT}"
 fi
+if [[ -n "${STUB_DRY_RUN:-}" ]]; then
+    echo '{"dependencies": [], "fixes": []}' > "${out}"
+    exit 0
+fi
 python3 -I - "${lockdir}/pylock.toml" "${out}" "${STUB_SKIP:-}" << 'PY'
 import json, sys, tomllib
 ADVISORIES = {
@@ -100,6 +105,8 @@ ADVISORIES = {
 lock, out, skip = sys.argv[1], sys.argv[2], sys.argv[3]
 deps = []
 for p in tomllib.load(open(lock, "rb"))["packages"]:
+    # pip-audit reports versions normalized.
+    p["version"] = ".".join(str(int(part)) if part.isdigit() else part for part in p["version"].split("."))
     if p["name"] == skip:
         deps.append({"name": p["name"], "skip_reason": "Dependency not found on PyPI and could not be audited: %s (%s)" % (p["name"], p["version"])})
     else:
@@ -199,7 +206,7 @@ chmod +x "${WORK}/bin/"*
 # by the name it runs as): each records its arguments, working directory and
 # the variables that would change its check, and answers with the real
 # managers' messages. Settings:
-#   STUB_FRESH      fresh (default), stale or error
+#   STUB_FRESH      fresh (default), stale, stale1 (Poetry 1.x's message) or error
 #   STUB_FRESH_FOR  the one manager STUB_FRESH applies to; the others answer fresh
 mkdir -p "${WORK}/managers"
 cat > "${WORK}/managers/uv" << 'EOF'
@@ -226,6 +233,10 @@ case "${state}:${tool}" in
         ;;
     stale:poetry)
         echo 'Error: pyproject.toml changed significantly since poetry.lock was last generated. Run `poetry lock` to fix the lock file.' >&2
+        exit 1
+        ;;
+    stale1:poetry)
+        echo 'Error: poetry.lock is not consistent with pyproject.toml. Run `poetry lock [--no-update]` to fix it.' >&2
         exit 1
         ;;
     stale:pdm)
@@ -443,13 +454,15 @@ check "unless allow_skipped lists it" rc_is 0
 cat > "${JOB}/requirements-loose.txt" << 'EOF'
 requests==2.19.1 --hash=sha256:63b52e3c866428a224f97cab011de738c36aec0185aa91cfacd418b5d58911d1
 urllib3>=1.23
--e git+https://github.com/example/private.git#egg=private
+-e ./libs/private
+-e git+https://github.com/example/shared.git@main#egg=shared
 EOF
 run audit requirements=requirements-loose.txt report_only=true
 check "an unpinned requirement can't be audited" rc_is 1
 check "saying why" said "  urllib3 : not pinned to one version (>=1.23)"
-check "a local editable package can't either, but needs no entry" said "Not audited, as local packages: private (requirements-loose.txt)"
-run audit requirements=requirements-loose.txt report_only=true allow_skipped=urllib3
+check "a local editable package can't either, but needs no entry" said "Not audited, as local packages: ./libs/private (requirements-loose.txt)"
+check "an editable git package is a git source, not a local one" said "  shared : a git source (git+https://github.com/example/shared.git@main#egg=shared)"
+run audit requirements=requirements-loose.txt report_only=true allow_skipped=urllib3,shared
 check "allow_skipped lets the rest through" rc_is 0
 cat > "${JOB}/pyproject.toml" << 'EOF'
 [project]
@@ -526,6 +539,38 @@ check "report_name names every report" report deps.json
 check "the run record" report deps.run-record.json
 check "names the inputs with their SHA-256" json_is deps.run-record.json '.inputs[0].sha256' "\"$(sha256sum "${JOB}/uv.lock" | cut -d' ' -f1)\""
 check "and the counts" json_is deps.run-record.json '.counts | [.audited, .findings, .vulnerable_packages]' '[5,3,2]'
+
+echo "=== audit: review fixes"
+fixture vulnerable
+for refused in -d --dry --ignore=PYSEC-2018-28 "--ignore PYSEC-2018-28" -vd -S --form=json --out=x; do
+    run audit "extra_args=${refused}"
+    check "extra_args can't hold ${refused}" said "ERROR: extra_args can't hold"
+    check "before pip-audit runs" not_run pip-audit
+done
+run audit "extra_args=-vv --cache-d /tmp/pip-audit-cache" report_only=true
+check "-v and an abbreviated --cache-dir with its value pass" args_have pip-audit -vv --cache-d /tmp/pip-audit-cache
+run audit report_only=true -- STUB_DRY_RUN=1
+check "a report that leaves out the packages given fails the step, report_only or not" rc_is 1
+check "naming them" said "pip-audit's report leaves out packages it was given, so there is no verdict: certifi, chardet, idna, requests, urllib3."
+run audit "ignore=PYSEC-2018-28 CVE-2018-18074 GHSA-j8r2-6x86-q33q PYSEC-2019-133" unused_ignores=deny
+check "an ID and its alias for one vulnerability both count as used" rc_is 0
+printf 'requests==2.19.01\n' > "${JOB}/requirements-zeros.txt"
+run audit requirements=requirements-zeros.txt report_only=true
+check "a version written with leading zeros keeps its finding's input" \
+    json_is pip-audit.sarif '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique' '["requirements-zeros.txt"]'
+VENV_PROJECT="${WORK}/project-venv"
+python3 -m venv --without-pip "${VENV_PROJECT}"
+SITE=$("${VENV_PROJECT}/bin/python" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+for dist in requests:2.19.1 fixture-vulnerable:0.1.0; do
+    mkdir -p "${SITE}/${dist%%:*}-${dist#*:}.dist-info"
+    printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "${dist%%:*}" "${dist#*:}" > "${SITE}/${dist%%:*}-${dist#*:}.dist-info/METADATA"
+done
+mv "${SITE}/fixture-vulnerable-0.1.0.dist-info" "${SITE}/fixture_vulnerable-0.1.0.dist-info"
+printf '{"url": "file://%s", "dir_info": {"editable": true}}' "${JOB}" > "${SITE}/fixture_vulnerable-0.1.0.dist-info/direct_url.json"
+run audit environment="${VENV_PROJECT}" report_only=true
+check "the project's editable install in an environment is local, needing no entry" said "Not audited, as local packages: fixture-vulnerable"
+check "and isn't sent to pip-audit" bash -c '! grep -q "fixture-vulnerable" "$1"' _ "${STUB}/pylock.toml"
+check "an environment's findings aren't put in SARIF, which is for the checkout" json_is pip-audit.sarif '.runs[0].results' '[]'
 
 echo "=== bandit"
 fixture vulnerable
@@ -622,6 +667,13 @@ for value in tests=B60 tests=hashlib skip=b101; do
     check "${value} is refused" said "tests and skip take Bandit test IDs"
     check "before Bandit runs" not_run bandit
 done
+for refused in -tB101 -bbase.json -x./src --base=base.json --exit "-qr ."; do
+    run bandit "extra_args=${refused}"
+    check "extra_args can't hold ${refused}" said "ERROR: extra_args can't hold"
+    check "before Bandit runs" not_run bandit
+done
+run bandit "extra_args=-n5 -qa vuln --num 3" -- STUB_BANDIT_REPORT=findings.json
+check "-n with its value attached, -a after -q, and an abbreviated --number pass" args_have bandit -n5 -qa vuln --num 3
 run bandit targets=missing
 check "a target that doesn't exist is refused" said "targets names 'missing', which doesn't exist"
 run bandit config=missing.yaml
@@ -854,6 +906,82 @@ check "the project and its members are local by design" said "1 problem: 1 local
 check "a directory outside isn't" said "local-source: shared 0.1.0 comes from ../shared, outside the lockfile's directory"
 run lock_verify lockfiles=workspace/uv.lock freshness=skip allow_local=shared
 check "unless allow_local names it" rc_is 0
+
+echo "=== lock_verify: review fixes"
+fixture ""
+printf '# a comment that ends in a backslash \\\nevil-package\n--extra-index-url http://127.attacker.example/simple\n--extra-index-url http://127.0.0.1:8080/simple\n--index-url https://user:hunter2@corp.example.com/simple\ngit+https://github.com/psf/requests.git@main#egg=requests\nhttps://example.com/pkg-1.0.whl\n' > "${JOB}/requirements.txt"
+run lock_verify requirements=requirements.txt report_only=true
+check "a comment line ending in a backslash doesn't swallow the next requirement" said "requirements.txt:2: unpinned: evil-package"
+check "a host that starts with 127. isn't loopback" said "insecure-index: the index http://127.attacker.example/simple is plain http"
+check "127.0.0.1 is" not_said "the index http://127.0.0.1:8080/simple is plain http"
+check "an index's credentials are never shown" not_said "hunter2"
+check "and kept out of the reports" bash -c '! grep -rq hunter2 "$1"' _ "${OUT}"
+check "a VCS URL without a name is named by its #egg=" said "unpinned-vcs: requests comes from git+https://github.com/psf/requests.git@main#egg=requests"
+check "an archive URL without a name is checked too" said "unhashed: https://example.com/pkg-1.0.whl has no hash"
+cat > "${JOB}/Pipfile.lock" << 'EOF'
+{"_meta": {"pipfile-spec": 6, "hash": {"sha256": "x"},
+  "sources": [{"name": "corp", "url": "https://corp.example.com/simple", "verify_ssl": false}]},
+ "default": {"requests": {"file": "https://github.com/psf/requests/archive/refs/heads/main.zip", "version": "==2.32.3"}},
+ "develop": {}}
+EOF
+run lock_verify lockfiles=Pipfile.lock freshness=skip report_only=true
+check "a Pipfile source without TLS verification is a finding" said "trusted-host: the source https://corp.example.com/simple has verify_ssl = false"
+check "a Pipfile file URL isn't a local path" said "unhashed: requests 2.32.3 has no hash"
+mkdir -p "${JOB}/flat"
+cat > "${JOB}/flat/uv.lock" << 'EOF'
+version = 1
+requires-python = ">=3.10"
+
+[[package]]
+name = "requests"
+version = "2.19.1"
+source = { registry = "../wheels" }
+wheels = [{ path = "requests-2.19.1-py2.py3-none-any.whl", hash = "sha256:63b52e3c866428a224f97cab011de738c36aec0185aa91cfacd418b5d58911d1" }]
+EOF
+run lock_verify lockfiles=flat/uv.lock freshness=skip
+check "a hashed package from a uv flat index passes" rc_is 0
+run audit lockfiles=flat/uv.lock report_only=true
+check "and is audited by name and version" said "requests 2.19.1: PYSEC-2018-28"
+cat > "${JOB}/poetry.lock" << 'EOF'
+[[package]]
+name = "six"
+version = "1.16.0"
+description = "Python 2 and 3 compatibility utilities"
+category = "main"
+optional = false
+python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*"
+
+[metadata]
+lock-version = "1.1"
+python-versions = "^3.10"
+content-hash = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[metadata.files]
+six = [
+    {file = "six-1.16.0-py2.py3-none-any.whl", hash = "sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254"},
+    {file = "six-1.16.0.tar.gz", hash = "sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926"},
+]
+EOF
+run lock_verify lockfiles=poetry.lock freshness=skip min_release_age_days=7
+check "poetry.lock 1.1's hashes in [metadata.files] count" rc_is 0
+check "min_release_age_days warns about a lockfile that records no upload times" \
+    said "WARN: poetry.lock records no upload time for 1 of its packages (six 1.16.0), so min_release_age_days can't check them"
+fixture vulnerable
+run lock_verify lockfiles=pdm.lock freshness=skip allowed_indexes=https://pypi.org/simple
+check "allowed_indexes warns that pdm.lock records no indexes" said "WARN: pdm.lock doesn't record the indexes its packages came from"
+printf '[packages]\nrequests = "==2.19.1"\n' > "${JOB}/Pipfile"
+run lock_verify -- STUB_FRESH=stale1 STUB_FRESH_FOR=poetry
+check "Poetry 1.x's message for a stale lockfile is a finding too" said "stale: poetry.lock is out of date with its pyproject.toml: poetry.lock is not consistent with pyproject.toml"
+fixture ""
+PTH_VENV="${WORK}/pth-venv"
+python3 -m venv --without-pip "${PTH_VENV}"
+SITE=$("${PTH_VENV}/bin/python" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf 'import os; open(%s, "w")\n' "'${WORK}/pth-ran'" > "${SITE}/evil.pth"
+printf 'import _virtualenv\n' > "${SITE}/_virtualenv.pth"
+run lock_verify environment="${PTH_VENV}"
+check "a .pth file no RECORD lists is a finding" said "record-unlisted: ${SITE}/evil.pth is in no package's RECORD"
+check "but not the one virtual environments come with" not_said "_virtualenv.pth is in no"
+check "and the check runs nothing in the environment" test ! -e "${WORK}/pth-ran"
 
 echo "=== lock_verify: installed files"
 VENV="${WORK}/record-venv"

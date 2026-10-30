@@ -211,9 +211,12 @@ for ((i = 1; i <= n; i++)); do
             pdm) (cd "${dir}" && pdm lock --check -v) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
             pipenv) (cd "${dir}" && env -u PIPENV_PIPFILE pipenv verify) > "${WORK}/fresh.log" 2>&1 || code=$? ;;
         esac
-        if grep -qE 'needs to be updated|changed significantly since poetry.lock|Lockfile is out of date|Pipfile.lock is out-of-date' "${WORK}/fresh.log"; then
+        # Poetry 1.6 to 1.8 say "not consistent", 1.x before and 2.x
+        # "changed significantly".
+        stale_re='needs to be updated|changed significantly since poetry.lock|poetry.lock is not consistent with pyproject.toml|Lockfile is out of date|Pipfile.lock is out-of-date'
+        if grep -qE "${stale_re}" "${WORK}/fresh.log"; then
             status=stale
-            message=$(grep -m 1 -E 'needs to be updated|changed significantly|out of date|out-of-date' "${WORK}/fresh.log" | sed -e 's/^[^A-Za-z]*//' -e 's/^error: //' -e 's/^Error: //')
+            message=$(grep -m 1 -E "${stale_re}" "${WORK}/fresh.log" | sed -e 's/^[^A-Za-z]*//' -e 's/^error: //' -e 's/^Error: //')
         elif [[ "${code}" -eq 0 ]]; then
             status=fresh
         else
@@ -232,14 +235,31 @@ done
 ENV_JSON=null
 if [[ -n "${ENVIRONMENT}" ]]; then
     PS_INPUTS+=("environment:${ENVIRONMENT}")
-    if ! ps_py "${ENVIRONMENT}" installed --record > "${WORK}/env.json" 2> "${WORK}/env.log"; then
+    # The environment's interpreter only names its site-packages, with -S so
+    # that no .pth file in them runs: the files are hashed by the helper's
+    # Python, so code in the environment can't change what the check sees.
+    if ! "${ENVIRONMENT}" -I -S -c "${SCRIPT_PYTHON_SECURITY_PY}" site-dirs > "${WORK}/site.json" 2> "${WORK}/env.log"; then
         ps_tail "${WORK}/env.log" 5
-        error "Could not check the files installed for ${ENVIRONMENT}, which needs Python 3.8 or newer."
+        error "Could not find the site-packages of ${ENVIRONMENT}, which needs Python 3.8 or newer."
     fi
-    ENV_JSON=$(jq -c '{python, version, packages: (.packages | length), files: ([.packages[].files // 0] | add // 0),
+    SITE_ARGS=()
+    while IFS= read -r directory; do
+        SITE_ARGS+=(--path "${directory}")
+    done < <(jq -r '.site[]' "${WORK}/site.json")
+    if [[ ${#SITE_ARGS[@]} -eq 0 ]]; then
+        error "${ENVIRONMENT} has no site-packages directory to check."
+    fi
+    if ! ps_py "${PS_PYTHON}" installed --record "${SITE_ARGS[@]}" > "${WORK}/env.json" 2> "${WORK}/env.log"; then
+        ps_tail "${WORK}/env.log" 5
+        error "Could not check the files installed for ${ENVIRONMENT}."
+    fi
+    # shellcheck disable=SC2016 # jq program, not shell
+    ENV_JSON=$(jq -c --slurpfile site "${WORK}/site.json" --arg python "${ENVIRONMENT}" '{python: $python,
+        version: $site[0].version, site: $site[0].site, packages: (.packages | length),
+        files: ([.packages[].files // 0] | add // 0),
         findings: [.findings[] | . + {lockfile: null, kind: "record-\(.kind)"}], warnings}' "${WORK}/env.json")
     # shellcheck disable=SC2034 # read by ps_run_record
-    PS_TARGET_JSON=$(jq -c '{python: .python, version: .version, packages: (.packages | length)}' "${WORK}/env.json")
+    PS_TARGET_JSON=$(jq -c '{python, version, packages}' <<< "${ENV_JSON}")
 fi
 
 # --- The verdict ---

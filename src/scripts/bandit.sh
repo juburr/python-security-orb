@@ -89,25 +89,47 @@ if [[ -z "${CONFIG}" && -f pyproject.toml ]] && grep -q '^\[tool\.bandit[].]' py
     CONFIG=pyproject.toml
     echo "Using the [tool.bandit] settings in pyproject.toml."
 fi
-# Options the command sets itself, or that would change what the report says.
+# Options the command sets itself, or that would change what the report says,
+# also as argparse abbreviations (--base for --baseline). Of the short
+# options, -v, -d and -q can be given, and -n and -a with their value
+# (attached, as in -n5, or next); the others are the command's. A word after
+# an option that takes a value is its value.
+REFUSED=(--format --output --recursive --exclude --severity-level --confidence-level --tests --skip --configfile --ini
+    --exit-zero --ignore-nosec --baseline --profile --version --help)
+value_next=false
 for word in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
-    case "${word%%=*}" in
-        -f | --format | -o | --output | -r | --recursive | -x | --exclude | -l | -i | --severity-level \
-            | --confidence-level | -t | --tests | -s | --skip | -c | --configfile | --ini | --exit-zero \
-            | --ignore-nosec | -b | --baseline | -p | --profile | --)
-            echo "ERROR: extra_args can't hold ${word%%=*}: the bandit command sets it, or it would change what the report says." >&2
+    if [[ "${value_next}" == true ]]; then
+        value_next=false
+        continue
+    fi
+    case "${word}" in
+        --)
+            echo "ERROR: extra_args can't hold --: what follows would be scanned. Name what to scan in targets." >&2
             exit 1
             ;;
-        -*) ;;
-        *)
-            if [[ "${prev:-}" != -n && "${prev:-}" != --number && "${prev:-}" != -a && "${prev:-}" != --aggregate \
-                && "${prev:-}" != --msg-template ]]; then
-                echo "ERROR: extra_args can't hold '${word}': Bandit would scan it. Name what to scan in targets." >&2
+        --*)
+            if ps_abbreviates "${word}" "${REFUSED[@]}"; then
+                echo "ERROR: extra_args can't hold ${word%%=*}: the bandit command sets it, or it would change what the report says." >&2
                 exit 1
             fi
+            if [[ "${word}" != *=* ]] && ps_abbreviates "${word}" --number --aggregate --msg-template; then
+                value_next=true
+            fi
+            ;;
+        -*)
+            if ! ps_match "${word}" '^-[vdq]*([an].*)?$' || [[ "${word}" == - ]]; then
+                echo "ERROR: extra_args can't hold ${word}: of Bandit's short options only -v, -d, -q, -n and -a can be given." >&2
+                exit 1
+            fi
+            if ps_match "${word}" '^-[vdq]*[an]$'; then
+                value_next=true
+            fi
+            ;;
+        *)
+            echo "ERROR: extra_args can't hold '${word}': Bandit would scan it. Name what to scan in targets." >&2
+            exit 1
             ;;
     esac
-    prev=${word}
 done
 ps_require_jq
 ps_output "${PARAM_OUTPUT_DIR}" "${REPORT_NAME}"
