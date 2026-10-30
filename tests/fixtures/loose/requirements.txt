@@ -1,0 +1,9 @@
+# Requirements a lockfile should never hold: each line below is a lock_verify
+# finding. Never install them.
+--index-url http://pypi.internal.example/simple
+--trusted-host pypi.internal.example
+requests>=2.19
+six==1.17.0
+attrs==25.3.0 --hash=md5:0123456789abcdef0123456789abcdef
+private-lib @ git+https://github.com/example/private-lib@main
+../shared/vendored-lib

@@ -1,0 +1,169 @@
+name: Audit Python dependencies with pip-audit
+description: >
+  Audits a project's locked dependencies for known vulnerabilities with
+  pip-audit, PyPA's scanner, which asks PyPI's (or OSV's) advisory database
+  about each package and version. It reads the lockfiles (uv.lock, poetry.lock,
+  pdm.lock, Pipfile.lock, pylock.toml), pinned requirements files or installed
+  environments named, or every lockfile in working_dir, and audits every pinned
+  version in them, whatever its markers, without resolving anything or running
+  build code. Writes JSON, SARIF and JUnit reports. Vulnerabilities not in
+  ignore fail the step unless report_only is true; an audit that didn't
+  complete, a package that couldn't be audited, or an audit of nothing fails it
+  either way. Run the install action (tools: pip-audit) first. The GitHub
+  Actions twin of the orb's audit command.
+author: juburr
+
+inputs:
+  working_dir:
+    description: >
+      The directory to run in. lockfiles, requirements and environment are relative
+      to it.
+    default: .
+  lockfiles:
+    description: >
+      Lockfiles to audit, separated by commas or spaces, as paths or globs: uv.lock,
+      poetry.lock (1.x and 2.x), pdm.lock (4.x), Pipfile.lock and PEP 751
+      pylock.toml files. Leave lockfiles, requirements and environment empty to
+      audit every lockfile in working_dir. A path or glob that matches no file fails
+      the step.
+    default: ""
+  requirements:
+    description: >
+      Requirements files to audit, separated by commas or spaces, as paths or globs,
+      such as uv pip compile or pip-compile output. Every requirement must be pinned
+      with ==, since only a pinned version can be audited without resolving; -r
+      includes are followed.
+    default: ""
+  environment:
+    description: >
+      An installed environment to audit, as its Python interpreter, such as
+      .venv/bin/python, or its directory, such as .venv: every distribution the
+      interpreter sees, which it lists itself, so the environment needs no pip.
+    default: ""
+  service:
+    description: >
+      The vulnerability service pip-audit asks: pypi (PyPI's JSON API, which reports
+      a package it doesn't know, such as a private one, as one it couldn't audit) or
+      osv (api.osv.dev, or osv_url, which returns nothing for a package it doesn't
+      know, so it passes unaudited).
+    default: pypi
+  osv_url:
+    description: >
+      With service osv, the URL of a self-hosted OSV API to ask instead of
+      https://api.osv.dev/v1/query: an https:// URL without credentials, a query or
+      a fragment.
+    default: ""
+  timeout:
+    description: >
+      Seconds pip-audit waits for each request to the vulnerability service.
+    default: "15"
+  ignore:
+    description: >
+      Vulnerability IDs to ignore, separated by commas or spaces, such as
+      PYSEC-2018-28 or GHSA-x84v-xcm2-53pg. An ID matches a vulnerability's own ID
+      or any alias, so a CVE ID works too. Ignored vulnerabilities are listed in the
+      reports.
+    default: ""
+  unused_ignores:
+    description: >
+      What to do about an ignore entry that matched no vulnerability, such as one
+      for a package since upgraded: allow, warn, or deny, which fails the step like
+      a finding.
+    default: warn
+  allow_skipped:
+    description: >
+      Packages that may go unaudited, separated by commas or spaces, such as private
+      packages no public advisory database knows, or a git dependency. Any other
+      package that couldn't be audited fails the step. Local packages, such as the
+      project itself, are never audited and need no entry.
+    default: ""
+  allow_empty:
+    description: >
+      Let an audit pass that found no package to audit. By default it fails, since
+      it checked nothing.
+    default: "false"
+  extra_args:
+    description: >
+      Further arguments for pip-audit, such as --cache-dir /tmp/pip-audit. They are
+      split like shell words, but nothing in them is expanded or run. Options that
+      decide what is audited or how the report is written are refused.
+    default: ""
+  output_dir:
+    description: >
+      Absolute path of the directory to write the reports into.
+    default: /tmp/python-security-reports
+  report_name:
+    description: >
+      The reports' file name without its extension: <report_name>.json (the orb's
+      summary), <report_name>.pip-audit.json (pip-audit's own report) and
+      <report_name>.sarif. Letters, digits, '.', '_' and '-'.
+    default: pip-audit
+  junit:
+    description: >
+      Write the audit as JUnit (output_dir/junit/<report_name>.xml), one case per
+      package.
+    default: "true"
+  run_record:
+    description: >
+      Also write a run record (<report_name>.run-record.json): what was audited,
+      from which inputs with their SHA-256, with which pip-audit, and what it found.
+    default: "false"
+  report_only:
+    description: >
+      Report vulnerabilities without failing the step, to adopt the check gradually.
+      An audit that didn't complete, a package that couldn't be audited, or an audit
+      of nothing still fails it.
+    default: "false"
+  store_artifacts:
+    description: >
+      Upload output_dir as a workflow artifact named
+      python-security-reports-<report_name>-<random>, including when the step fails.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Artifact names must be unique in a workflow run, and the same command
+    # can run in several jobs or matrix legs, so the name ends in a random
+    # suffix.
+    - name: Name the reports artifact
+      id: artifact
+      if: (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      shell: bash
+      env:
+        REPORT_NAME: ${{ inputs.report_name }}
+      run: |
+        if [[ ! "${REPORT_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            REPORT_NAME=reports
+        fi
+        printf 'name=python-security-reports-%s-%s\n' "${REPORT_NAME}" "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" >> "${GITHUB_OUTPUT}"
+    - name: pip-audit
+      shell: bash
+      working-directory: ${{ inputs.working_dir }}
+      env:
+        PARAM_ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        PARAM_ALLOW_SKIPPED: ${{ inputs.allow_skipped }}
+        PARAM_ENVIRONMENT: ${{ inputs.environment }}
+        PARAM_EXTRA_ARGS: ${{ inputs.extra_args }}
+        PARAM_IGNORE: ${{ inputs.ignore }}
+        PARAM_JUNIT: ${{ inputs.junit }}
+        PARAM_LOCKFILES: ${{ inputs.lockfiles }}
+        PARAM_OSV_URL: ${{ inputs.osv_url }}
+        PARAM_OUTPUT_DIR: ${{ inputs.output_dir }}
+        PARAM_REPORT_NAME: ${{ inputs.report_name }}
+        PARAM_REPORT_ONLY: ${{ inputs.report_only }}
+        PARAM_REQUIREMENTS: ${{ inputs.requirements }}
+        PARAM_RUN_RECORD: ${{ inputs.run_record }}
+        PARAM_SERVICE: ${{ inputs.service }}
+        PARAM_TIMEOUT: ${{ inputs.timeout }}
+        PARAM_UNUSED_IGNORES: ${{ inputs.unused_ignores }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/audit.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_PYTHON_SECURITY_PY=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.py"
+    - name: Upload the reports
+      if: always() && (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.artifact.outputs.name }}
+        path: ${{ inputs.output_dir }}
+        if-no-files-found: ignore

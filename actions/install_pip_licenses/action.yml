@@ -1,0 +1,159 @@
+name: Install pip-licenses
+description: >
+  Installs pip-licenses, which lists the licenses of the packages in an
+  environment, for the licenses command, into an environment of its own on the
+  Python that python names, with uv. uv installs this orb's lock for that
+  release, which pins pip-licenses and every dependency to one version and every
+  file to its SHA-256, so a changed or added file fails the install before
+  anything runs; wheels only, so no build code runs either. A script in
+  install_path runs it with python -I, so a job's PYTHONPATH and a project's
+  packages stay out of it. The GitHub Actions twin of the orb's
+  install_pip_licenses command.
+author: juburr
+
+inputs:
+  version:
+    description: >
+      The pip-licenses release to install, such as 5.5.5. strict verification
+      installs only the releases this orb has a lock for. A leading "v" is ignored,
+      and environment variables are expanded.
+    default: "5.5.5"
+  index_url:
+    description: >
+      The package index to download from, such as a PyPI mirror in Artifactory or
+      Nexus: an https:// URL, without credentials or a query or fragment. The lock's
+      hashes decide what is installed, so a mirror can only make the install fail.
+    default: "https://pypi.org/simple"
+  python:
+    description: >
+      The Python pip-licenses runs on: 3.10 to 3.14 for a CPython that uv downloads
+      and checks against the SHA-256 it carries for that build (the uv release
+      decides the patch release), "system" for the python3 on the PATH, or an
+      interpreter's absolute path. The locks cover CPython 3.10 to 3.14 on Linux.
+    default: "3.14"
+  python_install_mirror:
+    description: >
+      Base URL of a mirror of uv's Python downloads (python-build-standalone
+      releases), https:// or file://, for networks that can't reach GitHub. uv still
+      checks every download against the SHA-256 it carries.
+    default: ""
+  caching:
+    description: >
+      Cache uv (see install_uv) and the Python archive uv downloads, between jobs.
+      uv checks the archive against its SHA-256 every time it unpacks it. Installed
+      environments and packages are never cached.
+    default: "true"
+  install_path:
+    description: >
+      Absolute path of the directory uv is in (see install_uv), where pip-licenses
+      goes, with the script that runs it. It is added to the PATH of later steps
+      when it isn't already on it. Defaults to $HOME/.python-security-orb/bin.
+    default: ""
+  install_uv:
+    description: >
+      Install uv first, with install_uv and uv_version. Set it to false when an
+      earlier install_uv in the job put uv in install_path, as the install command
+      does.
+    default: "true"
+  uv_version:
+    description: >
+      The version of uv to install first (see install_uv).
+    default: "0.13.6"
+  download_base_url:
+    description: >
+      Base URL of an internal mirror of GitHub releases to download uv from (see
+      install_uv).
+    default: ""
+  verify_checksums:
+    description: >
+      Verification of uv against this orb's checksum table, and of pip-licenses
+      against this orb's lock for the release. "strict" (default) fails before
+      downloading anything when uv's version has no checksum, or pip-licenses's
+      release no lock. "known_versions" installs unlisted versions unverified, with
+      a warning. "false" skips verification and is not recommended.
+    default: strict
+
+runs:
+  using: composite
+  steps:
+    # The key is computed from a file that names the CPU (uname -m), HOME (a
+    # cache is restored to the absolute path it was saved from) and the
+    # version, as the orb's command computes it.
+    - name: Prepare uv cache key
+      id: uv-cache-key
+      if: (inputs.install_uv == 'true' || inputs.install_uv == '1') && (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-uv-cache-key
+        PARAM_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/cache_key.sh"
+        # Bump the version in the key when an existing checksum table entry
+        # changes, so caches saved for the old bytes stop being restored.
+        printf 'key=python-security-orb-uv-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the uv cache
+      id: uv-restore
+      if: (inputs.install_uv == 'true' || inputs.install_uv == '1') && (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
+    - name: Install uv
+      if: (inputs.install_uv == 'true' || inputs.install_uv == '1')
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_DOWNLOAD_BASE_URL: ${{ inputs.download_base_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.uv_version }}
+      run: bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/install/uv/install.sh"
+    # A saved cache can't be replaced, so it is only saved when none was
+    # restored. Like the orb's save_cache, it is saved right after the
+    # install, not at the end of the job.
+    - name: Save the uv cache
+      if: (inputs.install_uv == 'true' || inputs.install_uv == '1') && (inputs.caching == 'true' || inputs.caching == '1') && steps.uv-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
+    # uv checks a cached Python archive against the SHA-256 it carries
+    # whenever it unpacks it, so the cache is never trusted on its own.
+    - name: Prepare Python cache key
+      id: python-cache-key
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-python-cache-key
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_UV_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/python_cache_key.sh"
+        printf 'key=python-security-orb-python-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the Python cache
+      id: python-restore
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.python-cache-key.outputs.key }}
+    - name: Install pip-licenses
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_INDEX_URL: ${{ inputs.index_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_PYTHON_INSTALL_MIRROR: ${{ inputs.python_install_mirror }}
+        PARAM_TOOL: pip-licenses
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.version }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tool.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_TOOL_LOCKS=${GITHUB_ACTION_PATH}/../../src/install/pip-licenses/locks.txt"
+    - name: Save the Python cache
+      if: (inputs.caching == 'true' || inputs.caching == '1') && steps.python-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.python-cache-key.outputs.key }}

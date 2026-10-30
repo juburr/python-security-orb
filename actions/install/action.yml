@@ -1,0 +1,299 @@
+name: Install the Python security tools
+description: >
+  Installs the Python security tools named in tools, through the install command
+  for each (install_pip_audit, install_bandit, install_pip_licenses), which can
+  also be used on their own. uv comes first, verified against this orb's
+  checksum table (install_uv); it installs a CPython it checks against the
+  SHA-256 it carries, then each tool into an environment of its own from this
+  orb's lock for the release, which pins every file to its SHA-256. Run this
+  before the orb's other commands. The GitHub Actions twin of the orb's install
+  command.
+author: juburr
+
+inputs:
+  tools:
+    description: >
+      The tools to install, separated by commas or spaces: any of pip-audit (for
+      audit), bandit (for bandit), pip-licenses (for licenses), python (the Python
+      alone, for lock_verify) and uv. uv is always installed. An unknown name fails
+      the step.
+    default: "pip-audit,bandit"
+  pip_audit_version:
+    description: >
+      The pip-audit release, when tools names it.
+    default: "2.10.1"
+  bandit_version:
+    description: >
+      The Bandit release, when tools names it.
+    default: "1.9.4"
+  pip_licenses_version:
+    description: >
+      The pip-licenses release, when tools names it.
+    default: "5.5.5"
+  python:
+    description: >
+      The Python the tools run on: 3.10 to 3.14 for a CPython that uv downloads and
+      checks against the SHA-256 it carries for that build, "system" for the python3
+      on the PATH, or an interpreter's absolute path. Bandit parses code with it, so
+      it must be at least as new as the code's syntax.
+    default: "3.14"
+  index_url:
+    description: >
+      The package index to download the tools from, such as a PyPI mirror: an
+      https:// URL, without credentials or a query or fragment. The locks' hashes
+      decide what is installed.
+    default: "https://pypi.org/simple"
+  python_install_mirror:
+    description: >
+      Base URL of a mirror of uv's Python downloads, https:// or file://. uv still
+      checks every download against the SHA-256 it carries.
+    default: ""
+  download_base_url:
+    description: >
+      Base URL of an internal mirror of GitHub releases to download uv from instead
+      of https://github.com, such as an Artifactory or Nexus remote repository: an
+      https:// URL, without credentials or a query or fragment.
+    default: ""
+  uv_version:
+    description: >
+      The uv release.
+    default: "0.13.6"
+  caching:
+    description: >
+      Cache uv's verified release and the Python archive uv downloads between jobs.
+      Both are checked again whenever they are used. Installed environments and
+      packages are never cached.
+    default: "true"
+  install_path:
+    description: >
+      Absolute path of the directory to install uv and the scripts that run the
+      tools into. It is added to the PATH of later steps when it isn't already on
+      it. Defaults to $HOME/.python-security-orb/bin.
+    default: ""
+  verify_checksums:
+    description: >
+      Verification of uv against this orb's checksum table, and of each tool against
+      this orb's lock for its release. "strict" (default) fails before downloading
+      anything when a version has no checksum or lock. "known_versions" installs
+      unlisted versions unverified, with a warning. "false" skips verification and
+      is not recommended.
+    default: strict
+
+runs:
+  using: composite
+  steps:
+    - name: Check the tools to install
+      id: tools
+      shell: bash
+      env:
+        PARAM_TOOLS: ${{ inputs.tools }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tools.sh"
+        # The names, space-separated with a space on either side, for the
+        # if: conditions below.
+        read -r -a tools <<< "${PARAM_TOOLS//,/ }"
+        printf 'list= %s \n' "${tools[*]}" >> "${GITHUB_OUTPUT}"
+    # The key is computed from a file that names the CPU (uname -m), HOME (a
+    # cache is restored to the absolute path it was saved from) and the
+    # version, as the orb's command computes it.
+    - name: Prepare uv cache key
+      id: uv-cache-key
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-uv-cache-key
+        PARAM_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/cache_key.sh"
+        # Bump the version in the key when an existing checksum table entry
+        # changes, so caches saved for the old bytes stop being restored.
+        printf 'key=python-security-orb-uv-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the uv cache
+      id: uv-restore
+      if: (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
+    - name: Install uv
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_DOWNLOAD_BASE_URL: ${{ inputs.download_base_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.uv_version }}
+      run: bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/install/uv/install.sh"
+    # A saved cache can't be replaced, so it is only saved when none was
+    # restored. Like the orb's save_cache, it is saved right after the
+    # install, not at the end of the job.
+    - name: Save the uv cache
+      if: (inputs.caching == 'true' || inputs.caching == '1') && steps.uv-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb-uv
+        key: ${{ steps.uv-cache-key.outputs.key }}
+    # uv checks a cached Python archive against the SHA-256 it carries
+    # whenever it unpacks it, so the cache is never trusted on its own.
+    - name: Prepare Python cache key
+      id: python-cache-key
+      if: contains(steps.tools.outputs.list, ' python ') && (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-python-cache-key
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_UV_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/python_cache_key.sh"
+        printf 'key=python-security-orb-python-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the Python cache
+      id: python-restore
+      if: contains(steps.tools.outputs.list, ' python ') && (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.python-cache-key.outputs.key }}
+    - name: Install Python
+      if: contains(steps.tools.outputs.list, ' python ')
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_INDEX_URL: ""
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_PYTHON_INSTALL_MIRROR: ${{ inputs.python_install_mirror }}
+        PARAM_TOOL: python
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ""
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tool.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh"
+    - name: Save the Python cache
+      if: contains(steps.tools.outputs.list, ' python ') && (inputs.caching == 'true' || inputs.caching == '1') && steps.python-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.python-cache-key.outputs.key }}
+    # uv checks a cached Python archive against the SHA-256 it carries
+    # whenever it unpacks it, so the cache is never trusted on its own.
+    - name: Prepare Python cache key
+      id: pip-audit-cache-key
+      if: contains(steps.tools.outputs.list, ' pip-audit ') && (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-python-cache-key
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_UV_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/python_cache_key.sh"
+        printf 'key=python-security-orb-python-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the Python cache
+      id: pip-audit-restore
+      if: contains(steps.tools.outputs.list, ' pip-audit ') && (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.pip-audit-cache-key.outputs.key }}
+    - name: Install pip-audit
+      if: contains(steps.tools.outputs.list, ' pip-audit ')
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_INDEX_URL: ${{ inputs.index_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_PYTHON_INSTALL_MIRROR: ${{ inputs.python_install_mirror }}
+        PARAM_TOOL: pip-audit
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.pip_audit_version }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tool.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_TOOL_LOCKS=${GITHUB_ACTION_PATH}/../../src/install/pip-audit/locks.txt"
+    - name: Save the Python cache
+      if: contains(steps.tools.outputs.list, ' pip-audit ') && (inputs.caching == 'true' || inputs.caching == '1') && steps.pip-audit-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.pip-audit-cache-key.outputs.key }}
+    # uv checks a cached Python archive against the SHA-256 it carries
+    # whenever it unpacks it, so the cache is never trusted on its own.
+    - name: Prepare Python cache key
+      id: bandit-cache-key
+      if: contains(steps.tools.outputs.list, ' bandit ') && (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-python-cache-key
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_UV_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/python_cache_key.sh"
+        printf 'key=python-security-orb-python-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the Python cache
+      id: bandit-restore
+      if: contains(steps.tools.outputs.list, ' bandit ') && (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.bandit-cache-key.outputs.key }}
+    - name: Install Bandit
+      if: contains(steps.tools.outputs.list, ' bandit ')
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_INDEX_URL: ${{ inputs.index_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_PYTHON_INSTALL_MIRROR: ${{ inputs.python_install_mirror }}
+        PARAM_TOOL: bandit
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.bandit_version }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tool.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_TOOL_LOCKS=${GITHUB_ACTION_PATH}/../../src/install/bandit/locks.txt"
+    - name: Save the Python cache
+      if: contains(steps.tools.outputs.list, ' bandit ') && (inputs.caching == 'true' || inputs.caching == '1') && steps.bandit-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.bandit-cache-key.outputs.key }}
+    # uv checks a cached Python archive against the SHA-256 it carries
+    # whenever it unpacks it, so the cache is never trusted on its own.
+    - name: Prepare Python cache key
+      id: pip-licenses-cache-key
+      if: contains(steps.tools.outputs.list, ' pip-licenses ') && (inputs.caching == 'true' || inputs.caching == '1')
+      shell: bash
+      env:
+        ORB_CACHE_KEY_FILE: ${{ runner.temp }}/python-security-orb-python-cache-key
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_UV_VERSION: ${{ inputs.uv_version }}
+      run: |
+        bash "${GITHUB_ACTION_PATH}/../../src/scripts/python_cache_key.sh"
+        printf 'key=python-security-orb-python-v1-%s\n' "$(sha256sum < "${ORB_CACHE_KEY_FILE}" | cut -c1-64)" >> "${GITHUB_OUTPUT}"
+    - name: Restore the Python cache
+      id: pip-licenses-restore
+      if: contains(steps.tools.outputs.list, ' pip-licenses ') && (inputs.caching == 'true' || inputs.caching == '1')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.pip-licenses-cache-key.outputs.key }}
+    - name: Install pip-licenses
+      if: contains(steps.tools.outputs.list, ' pip-licenses ')
+      shell: bash
+      env:
+        PARAM_CACHING: ${{ inputs.caching }}
+        PARAM_INDEX_URL: ${{ inputs.index_url }}
+        PARAM_INSTALL_PATH: ${{ inputs.install_path }}
+        PARAM_PYTHON: ${{ inputs.python }}
+        PARAM_PYTHON_INSTALL_MIRROR: ${{ inputs.python_install_mirror }}
+        PARAM_TOOL: pip-licenses
+        PARAM_VERIFY_CHECKSUMS: ${{ inputs.verify_checksums }}
+        PARAM_VERSION: ${{ inputs.pip_licenses_version }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/install_tool.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_TOOL_LOCKS=${GITHUB_ACTION_PATH}/../../src/install/pip-licenses/locks.txt"
+    - name: Save the Python cache
+      if: contains(steps.tools.outputs.list, ' pip-licenses ') && (inputs.caching == 'true' || inputs.caching == '1') && steps.pip-licenses-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/python-security-orb/python
+        key: ${{ steps.pip-licenses-cache-key.outputs.key }}

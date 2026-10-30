@@ -1,0 +1,384 @@
+version: 2.1
+orbs:
+  # Your orb will be automatically injected here during the pipeline.
+  # Reference your orb's jobs and commands below as they will exist when built.
+  orb-tools: circleci/orb-tools@12.5
+  # The orb definition is intentionally not included here. It will be injected into the pipeline.
+  python-security-orb: {}
+
+# Use this tag to ensure test jobs always run,
+# even though the downstream publish job will only run on release tags.
+filters: &filters
+  tags:
+    only: /.*/
+
+# Filter for release tags.
+release-filters: &release-filters
+  branches:
+    ignore: /.*/
+  tags:
+    only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+
+commands:
+  # Checks every report under output_dir: SARIF against the OASIS SARIF 2.1.0 schema, pinned by
+  # SHA-256, JUnit's counts, and run records against schemas/run-record.v1.json.
+  validate-reports:
+    steps:
+      - run:
+          name: Validate the reports
+          command: bash tests/validate_reports.sh
+  # A virtual environment in /tmp/project, a copy of the vulnerable fixture, with its locked
+  # dependencies installed by hash.
+  vulnerable-environment:
+    steps:
+      - run:
+          name: Install the vulnerable fixture's dependencies into /tmp/project/.venv
+          command: |
+            cp -R tests/fixtures/vulnerable /tmp/project
+            cd /tmp/project
+            uv venv --no-config --python "${PYTHON_SECURITY_ORB_PYTHON}" .venv
+            uv pip install --no-config --python .venv/bin/python --require-hashes --no-deps -r requirements.txt
+
+jobs:
+  # Every tool, with the default Python and the oldest the locks cover, on an image with no Python
+  # of its own the orb could use.
+  install-test:
+    parameters:
+      python:
+        type: string
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: python,pip-audit,bandit,pip-licenses
+          python: << parameters.python >>
+      - run:
+          name: Check the installs
+          environment:
+            PYTHON: << parameters.python >>
+          command: |
+            set -x
+            uv --version | grep -qx 'uv 0.13.6'
+            "${PYTHON_SECURITY_ORB_PYTHON}" --version | grep -q "^Python ${PYTHON}\."
+            pip-audit --version | grep -qx 'pip-audit 2.10.1'
+            bandit --version | head -n 1 | grep -qx 'bandit 1.9.4'
+            pip-licenses --version | grep -qx 'pip-licenses 5.5.5'
+            for tool in pip-audit bandit pip-licenses; do
+                record="${HOME}/.python-security-orb/bin/.${tool}.install.json"
+                jq -e --arg python "${PYTHON}" '.verified == true and (.python.version | startswith($python + "."))' "${record}"
+                # Each tool runs on its own environment's Python, isolated from the job's.
+                grep -q ' -I -m ' "$(command -v "${tool}")"
+            done
+  # Versions the locks don't list fail closed before anything is downloaded; known_versions installs
+  # them unverified.
+  checksum-test:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install_uv
+      - run:
+          name: An unlisted uv fails closed
+          command: |
+            if bash tests/run_command.sh install_uv version=0.12.0 > /tmp/uv.log 2>&1; then
+                cat /tmp/uv.log
+                echo "An unlisted uv was installed."
+                exit 1
+            fi
+            cat /tmp/uv.log
+            grep -q 'ERROR: ' /tmp/uv.log
+      - run:
+          name: An unlisted pip-audit fails closed
+          command: |
+            if bash tests/run_command.sh install_pip_audit version=2.9.0 > /tmp/pip-audit.log 2>&1; then
+                cat /tmp/pip-audit.log
+                echo "An unlisted pip-audit was installed."
+                exit 1
+            fi
+            cat /tmp/pip-audit.log
+            grep -q 'ERROR: This orb has no lock for pip-audit 2.9.0' /tmp/pip-audit.log
+      - python-security-orb/install_pip_audit:
+          version: 2.9.0
+          verify_checksums: known_versions
+          install_uv: false
+      - run:
+          name: known_versions installs it unverified
+          command: |
+            pip-audit --version | grep -qx 'pip-audit 2.9.0'
+            jq -e '.verified == false and .verify_checksums == "known_versions"' "${HOME}/.python-security-orb/bin/.pip-audit.install.json"
+  arm64-test:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.medium
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: pip-audit,bandit,pip-licenses
+      - run:
+          name: Check the installs
+          command: |
+            uname -m | grep -qx aarch64
+            pip-audit --version
+            bandit --version
+            pip-licenses --version
+      - python-security-orb/bandit:
+          working_dir: tests/fixtures/clean
+          report_name: bandit-arm64
+  audit-test:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: pip-audit
+      - python-security-orb/audit:
+          working_dir: tests/fixtures/clean
+          report_name: audit-clean
+          run_record: true
+      - python-security-orb/audit:
+          working_dir: tests/fixtures/vulnerable
+          report_name: audit-vulnerable
+          run_record: true
+          report_only: true
+      - python-security-orb/audit:
+          working_dir: tests/fixtures/vulnerable
+          service: osv
+          report_name: audit-osv
+          report_only: true
+      - run:
+          name: Check what the audits found
+          command: |
+            set -x
+            jq -e '.findings == [] and (.inputs | length) == 5' /tmp/python-security-reports/audit-clean.json
+            # requests 2.19.1's advisories, found in every lockfile format.
+            for report in audit-vulnerable audit-osv; do
+                jq -e '[.findings[] | select(.package == "requests") | .id, .aliases[]] | index("CVE-2018-18074") != null' \
+                    "/tmp/python-security-reports/${report}.json"
+            done
+            jq -e '[.findings[].inputs | length] | min == 5' /tmp/python-security-reports/audit-vulnerable.json
+            jq -e '.outcome == "findings-reported"' /tmp/python-security-reports/audit-vulnerable.run-record.json
+      - run:
+          name: Vulnerabilities fail the step
+          command: |
+            if bash tests/run_command.sh audit working_dir=tests/fixtures/vulnerable report_name=audit-fails > /tmp/audit.log 2>&1; then
+                cat /tmp/audit.log
+                exit 1
+            fi
+            cat /tmp/audit.log
+            grep -q '^ERROR: pip-audit found [0-9]* vulnerabilities' /tmp/audit.log
+      - run:
+          name: Ignored vulnerabilities pass, and an ignore that matches none fails with deny
+          command: |
+            ids=$(jq -r '[.findings[].id] | unique | join(" ")' /tmp/python-security-reports/audit-vulnerable.json)
+            bash tests/run_command.sh audit working_dir=tests/fixtures/vulnerable report_name=audit-ignored "ignore=${ids}"
+            if bash tests/run_command.sh audit working_dir=tests/fixtures/clean report_name=audit-unused \
+                ignore=PYSEC-2018-28 unused_ignores=deny > /tmp/unused.log 2>&1; then
+                cat /tmp/unused.log
+                exit 1
+            fi
+            grep -q 'matched none (unused_ignores: deny)' /tmp/unused.log
+      - vulnerable-environment
+      - python-security-orb/audit:
+          working_dir: /tmp/project
+          environment: .venv
+          report_name: audit-environment
+          report_only: true
+      - run:
+          name: An installed environment is audited too
+          command: |
+            jq -e '.inputs[0].kind == "environment" and ([.findings[].package] | index("requests") != null)' \
+                /tmp/python-security-reports/audit-environment.json
+      - validate-reports
+  bandit-test:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: bandit
+      - python-security-orb/bandit:
+          working_dir: tests/fixtures/clean
+          report_name: bandit-clean
+          run_record: true
+      - python-security-orb/bandit:
+          working_dir: tests/fixtures/vulnerable
+          report_name: bandit-vulnerable
+          require_suppression_reasons: true
+          run_record: true
+          report_only: true
+      - run:
+          name: Check what Bandit found
+          command: |
+            set -x
+            jq -e '[.results[].test_id] | sort == ["B324", "B403", "B404", "B602"]' /tmp/python-security-reports/bandit-vulnerable.json
+            jq -e '[.[] | [.test_id, .reason]] == [["B301", ""], ["B108", "a fixed path in a test fixture"]]' \
+                /tmp/python-security-reports/bandit-vulnerable.suppressed.json
+            jq -e '.counts.suppressed_without_reason == 1' /tmp/python-security-reports/bandit-vulnerable.run-record.json
+      - run:
+          name: Findings, and a file Bandit can't parse, fail the step
+          command: |
+            if bash tests/run_command.sh bandit working_dir=tests/fixtures/vulnerable report_name=bandit-fails > /tmp/bandit.log 2>&1; then
+                cat /tmp/bandit.log
+                exit 1
+            fi
+            grep -q '^ERROR: Bandit found 4 problems.' /tmp/bandit.log
+            mkdir -p /tmp/broken
+            cp tests/fixtures/bandit/new.py tests/fixtures/clean/app.py /tmp/broken/
+            if bash tests/run_command.sh bandit working_dir=/tmp/broken report_name=bandit-broken report_only=true > /tmp/broken.log 2>&1; then
+                cat /tmp/broken.log
+                exit 1
+            fi
+            cat /tmp/broken.log
+            grep -q "ERROR: Bandit couldn't scan 1 file" /tmp/broken.log
+      - validate-reports
+  licenses-test:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: pip-licenses
+      - vulnerable-environment
+      - python-security-orb/licenses:
+          working_dir: /tmp/project
+          report_name: licenses-default
+          run_record: true
+          report_only: true
+      - run:
+          name: Check the inventory
+          command: |
+            set -x
+            jq -e '[.packages[].name] | sort == ["certifi", "chardet", "idna", "requests", "urllib3"]' \
+                /tmp/python-security-reports/licenses-default.json
+            jq -e '[.findings[].name] | index("certifi") != null' /tmp/python-security-reports/licenses-default.json
+            jq -e '[.packages[] | select(.name == "requests")][0].license == "Apache-2.0"' /tmp/python-security-reports/licenses-default.json
+      - python-security-orb/licenses:
+          working_dir: /tmp/project
+          report_name: licenses-allowed
+          allowed_licenses: Apache-2.0 MIT MPL-2.0 BSD-3-Clause LGPL-2.1-or-later
+          clarify: |
+            # idna's LICENSE.rst is BSD-3-Clause; chardet 3.0.4 says only "LGPL".
+            idna==2.7=BSD-3-Clause
+            chardet==3.0.4=LGPL-2.1-or-later
+      - run:
+          name: Licenses that aren't allowed fail the step
+          command: |
+            if bash tests/run_command.sh licenses working_dir=/tmp/project report_name=licenses-fails > /tmp/licenses.log 2>&1; then
+                cat /tmp/licenses.log
+                exit 1
+            fi
+            cat /tmp/licenses.log
+            grep -q "have a license that isn't allowed\|has a license that isn't allowed" /tmp/licenses.log
+      - python-security-orb/lock_verify:
+          working_dir: /tmp/project
+          lockfiles: uv.lock
+          environment: .venv
+          report_name: lock-environment
+          run_record: true
+      - run:
+          name: A changed installed file fails lock_verify
+          command: |
+            site=$(/tmp/project/.venv/bin/python -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+            echo '# changed' >> "${site}/requests/__init__.py"
+            if bash tests/run_command.sh lock_verify working_dir=/tmp/project environment=.venv freshness=skip \
+                report_name=lock-changed > /tmp/changed.log 2>&1; then
+                cat /tmp/changed.log
+                exit 1
+            fi
+            cat /tmp/changed.log
+            grep -q 'record-modified: requests 2.19.1: requests/__init__.py' /tmp/changed.log
+      - validate-reports
+  lock-verify-test:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - python-security-orb/install:
+          tools: python
+      # The fixtures' other lockfiles hold placeholder content hashes, so only uv checks its own.
+      - python-security-orb/lock_verify:
+          working_dir: tests/fixtures/clean
+          lockfiles: uv.lock pylock.toml
+          requirements: requirements.txt
+          report_name: lock-clean
+          run_record: true
+      - python-security-orb/lock_verify:
+          working_dir: tests/fixtures/vulnerable
+          report_name: lock-vulnerable
+          freshness: skip
+          min_release_age_days: 7
+          allowed_indexes: https://pypi.org/simple
+      - python-security-orb/lock_verify:
+          working_dir: tests/fixtures/loose
+          requirements: requirements.txt
+          report_name: lock-loose
+          run_record: true
+          report_only: true
+      - run:
+          name: Check what lock_verify found
+          command: |
+            set -x
+            # uv checked uv.lock against its pyproject.toml.
+            jq -e '.inputs[] | select(.kind == "uv.lock") | .freshness.status == "fresh"' /tmp/python-security-reports/lock-clean.json
+            jq -e '[.findings[].kind] | sort == ["insecure-index", "local-source", "trusted-host", "unhashed", "unpinned", "unpinned-vcs", "weak-hash"]' \
+                /tmp/python-security-reports/lock-loose.json
+      - run:
+          name: A loose requirements file and a stale uv.lock fail the step
+          command: |
+            if bash tests/run_command.sh lock_verify working_dir=tests/fixtures/loose requirements=requirements.txt \
+                report_name=lock-fails > /tmp/loose.log 2>&1; then
+                cat /tmp/loose.log
+                exit 1
+            fi
+            grep -q '^ERROR: lock_verify found 7 problems' /tmp/loose.log
+            cp -R tests/fixtures/clean /tmp/stale
+            sed -i 's/six==1.17.0/six==1.16.0/' /tmp/stale/pyproject.toml
+            if bash tests/run_command.sh lock_verify working_dir=/tmp/stale lockfiles=uv.lock report_name=lock-stale > /tmp/stale.log 2>&1; then
+                cat /tmp/stale.log
+                exit 1
+            fi
+            cat /tmp/stale.log
+            grep -q 'stale: uv.lock is out of date with its pyproject.toml' /tmp/stale.log
+      - validate-reports
+
+workflows:
+  test-deploy:
+    jobs:
+      # Make sure to include "filters: *filters" in every test job you want to run as part of your deployment.
+      - install-test:
+          matrix:
+            parameters:
+              python: ["3.10", "3.14"]
+          filters: *filters
+      - checksum-test:
+          filters: *filters
+      - arm64-test:
+          filters: *filters
+      - audit-test:
+          filters: *filters
+      - bandit-test:
+          filters: *filters
+      - licenses-test:
+          filters: *filters
+      - lock-verify-test:
+          filters: *filters
+      # The orb must be re-packed for publishing, and saved to the workspace.
+      - orb-tools/pack:
+          filters: *release-filters
+      - orb-tools/publish:
+          orb_name: juburr/python-security-orb
+          vcs_type: << pipeline.project.type >>
+          pub_type: production
+          # Ensure this job requires all test jobs and the pack job.
+          requires:
+            - orb-tools/pack
+            - install-test
+            - checksum-test
+            - arm64-test
+            - audit-test
+            - bandit-test
+            - licenses-test
+            - lock-verify-test
+          context: orb-publishing
+          filters: *release-filters

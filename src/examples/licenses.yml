@@ -1,0 +1,37 @@
+description: >
+  Check the licenses of what a project installs. licenses inventories an
+  installed environment, so the dependencies are installed first, here
+  with uv from uv.lock. allowed_licenses lists the SPDX licenses the
+  project accepts; clarify gives the license of a package whose metadata
+  doesn't name one exactly, and ignore leaves out the organization's own
+  packages. lock_verify then checks every installed file against its
+  RECORD hash.
+
+usage:
+  version: 2.1
+  orbs:
+    python-security: juburr/python-security-orb@0.1.0
+  jobs:
+    licenses:
+      docker:
+        - image: cimg/base:current
+      steps:
+        - checkout
+        - python-security/install:
+            tools: pip-licenses
+        - run:
+            name: Install the locked dependencies
+            command: uv sync --locked --no-dev --python "${PYTHON_SECURITY_ORB_PYTHON}"
+        - python-security/licenses:
+            allowed_licenses: Apache-2.0 BSD-2-Clause BSD-3-Clause ISC MIT MPL-2.0 PSF-2.0
+            clarify: |
+              # Its LICENSE file is the 3-clause BSD license.
+              example-package==1.2.3=BSD-3-Clause
+            ignore: our-internal-package
+        - python-security/lock_verify:
+            lockfiles: uv.lock
+            environment: .venv
+  workflows:
+    licenses:
+      jobs:
+        - licenses

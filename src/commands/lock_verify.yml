@@ -1,0 +1,171 @@
+description: >
+  Checks that a project's lockfiles pin what gets installed: every package
+  pinned to one version and hashed with SHA-256 or stronger, git sources at a
+  full commit, no local path outside the lockfile's directory, https indexes
+  only, no --trusted-host, and optionally only allowed_indexes and releases
+  older than min_release_age_days. It reads uv.lock, poetry.lock, pdm.lock,
+  Pipfile.lock, pylock.toml and requirements files, without installing or
+  resolving anything. Then it checks each lockfile is up to date with its
+  pyproject.toml with its package manager, when that is on the PATH (uv
+  lock --check, poetry check --lock, pdm lock --check, pipenv verify), and
+  with environment, every installed file against its RECORD hash. Writes
+  JSON, SARIF and JUnit reports. Findings fail the step unless report_only
+  is true; a lockfile that can't be read, a package manager that can't
+  complete its check, or a check of nothing fails it either way. Needs a
+  Python 3.11 or newer, or tomli, to read TOML lockfiles: run install
+  (tools: python, or any tool) first on images without one.
+parameters:
+  working_dir:
+    type: string
+    default: "."
+    description: The directory to run in. lockfiles, requirements and environment are relative to it.
+  lockfiles:
+    type: string
+    default: ""
+    description: >
+      Lockfiles to check, separated by commas or spaces, as paths or globs:
+      uv.lock, poetry.lock (1.x and 2.x), pdm.lock (4.x), Pipfile.lock and
+      PEP 751 pylock.toml files. Leave lockfiles, requirements and environment
+      empty to check every lockfile in working_dir. A path or glob that
+      matches no file fails the step. Environment variables are expanded.
+  requirements:
+    type: string
+    default: ""
+    description: >
+      Requirements files to check, separated by commas or spaces, as paths or
+      globs, such as uv pip compile --generate-hashes or pip-compile output;
+      -r includes are followed. pip installs them with --require-hashes only
+      when every requirement has a hash. Environment variables are expanded.
+  environment:
+    type: string
+    default: ""
+    description: >
+      An installed environment whose files to check against the SHA-256 that
+      each package's RECORD lists, as its Python interpreter, such as
+      .venv/bin/python, or its directory, such as .venv: a changed or missing
+      file is a finding, and so is a .pth file no RECORD lists, which Python
+      would run at startup. With include-system-site-packages, and for a
+      system interpreter, the base interpreter's and the user's site-packages
+      are checked too. Nothing in the environment runs during the check.
+      Compiled .pyc files, which installers write after RECORD, aren't
+      checked. Environment variables are expanded.
+  require_hashes:
+    type: boolean
+    default: true
+    description: >
+      Require a SHA-256 (or stronger) hash for every file a package can be
+      installed from. Set it to false for requirements files that only pin
+      versions.
+  min_release_age_days:
+    type: integer
+    default: 0
+    description: >
+      Report a package release uploaded fewer than this many days ago, such as
+      7, since most malicious releases are found and removed within days. It
+      reads the upload times uv.lock and pylock.toml record; poetry.lock,
+      pdm.lock, Pipfile.lock and requirements files record none, which it
+      warns about. 0 turns it off.
+  allowed_indexes:
+    type: string
+    default: ""
+    description: >
+      The package indexes a lockfile may use, as URLs separated by commas or
+      spaces, such as https://pypi.org/simple. Empty allows any https index,
+      with a warning when a lockfile uses more than one. Environment variables
+      are expanded.
+  allow_local:
+    type: string
+    default: ""
+    description: >
+      Packages that may come from a local path outside the lockfile's
+      directory, separated by commas or spaces. The project, its workspace
+      members and other paths inside the lockfile's directory need no entry.
+      Environment variables are expanded.
+  freshness:
+    type: enum
+    enum: ["auto", "require", "skip"]
+    default: auto
+    description: >
+      Whether to check each lockfile against its pyproject.toml (or Pipfile)
+      with its package manager: auto when the manager is on the PATH, require
+      to fail when it isn't, skip never. A stale lockfile is a finding.
+      uv may contact the package index while it checks.
+  allow_empty:
+    type: boolean
+    default: false
+    description: >
+      Let a check pass that found no package to check. By default it fails,
+      since it checked nothing.
+  output_dir:
+    type: string
+    default: /tmp/python-security-reports
+    description: >
+      Absolute path of the directory to write the reports into. Environment
+      variables are not expanded, since the path is also passed to
+      store_artifacts and store_test_results.
+  report_name:
+    type: string
+    default: lock-verify
+    description: >
+      The reports' file name without its extension: <report_name>.json and
+      <report_name>.sarif. Letters, digits, '.', '_' and '-'.
+  junit:
+    type: boolean
+    default: true
+    description: >
+      Write the check as JUnit (output_dir/junit/<report_name>.xml), one case
+      per lockfile, and store it with store_test_results for CircleCI's Tests
+      tab.
+  run_record:
+    type: boolean
+    default: false
+    description: >
+      Also write a run record (<report_name>.run-record.json): which inputs
+      were checked, with their SHA-256, which package managers checked them,
+      and what it found.
+  report_only:
+    type: boolean
+    default: false
+    description: >
+      Report findings without failing the step, to adopt the check gradually.
+      A lockfile that can't be read, a package manager that can't complete
+      its check, or a check of nothing still fails it.
+  store_artifacts:
+    type: boolean
+    default: true
+    description: Store output_dir as job artifacts under python-security-reports/, including when the step fails.
+steps:
+  - run:
+      name: lock_verify (<< parameters.report_name >>)
+      working_directory: << parameters.working_dir >>
+      environment:
+        PARAM_ALLOW_EMPTY: << parameters.allow_empty >>
+        PARAM_ALLOW_LOCAL: << parameters.allow_local >>
+        PARAM_ALLOWED_INDEXES: << parameters.allowed_indexes >>
+        PARAM_ENVIRONMENT: << parameters.environment >>
+        PARAM_FRESHNESS: << parameters.freshness >>
+        PARAM_JUNIT: << parameters.junit >>
+        PARAM_LOCKFILES: << parameters.lockfiles >>
+        PARAM_MIN_RELEASE_AGE_DAYS: << parameters.min_release_age_days >>
+        PARAM_OUTPUT_DIR: << parameters.output_dir >>
+        PARAM_REPORT_NAME: << parameters.report_name >>
+        PARAM_REPORT_ONLY: << parameters.report_only >>
+        PARAM_REQUIRE_HASHES: << parameters.require_hashes >>
+        PARAM_REQUIREMENTS: << parameters.requirements >>
+        PARAM_RUN_RECORD: << parameters.run_record >>
+        SCRIPT_PYTHON_SECURITY_LIB: << include(scripts/lib/python_security.sh) >>
+        SCRIPT_PYTHON_SECURITY_PY: << include(scripts/lib/python_security.py) >>
+      command: << include(scripts/lock_verify.sh) >>
+  - when:
+      condition: << parameters.junit >>
+      steps:
+        - store_test_results:
+            path: << parameters.output_dir >>/junit/<< parameters.report_name >>.xml
+            when: always
+  - when:
+      condition: << parameters.store_artifacts >>
+      steps:
+        - store_artifacts:
+            path: << parameters.output_dir >>
+            destination: python-security-reports
+            when: always

@@ -1,0 +1,30 @@
+description: >
+  Check a Python project on every commit: its lockfiles for known
+  vulnerabilities (audit) and for packages that aren't pinned and hashed or
+  that pyproject.toml no longer matches (lock_verify), and its code for
+  security problems (bandit). None of them installs the project or runs its
+  build code. install puts uv, a verified CPython and each tool into
+  environments of their own, from this orb's hash-pinned locks.
+
+usage:
+  version: 2.1
+  orbs:
+    python-security: juburr/python-security-orb@0.1.0
+  jobs:
+    security:
+      docker:
+        - image: cimg/base:current
+      steps:
+        - checkout
+        - python-security/install:
+            tools: pip-audit,bandit
+        - python-security/lock_verify:
+            min_release_age_days: 7
+        - python-security/audit
+        - python-security/bandit:
+            targets: src
+            require_suppression_reasons: true
+  workflows:
+    security:
+      jobs:
+        - security

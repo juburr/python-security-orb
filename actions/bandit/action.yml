@@ -1,0 +1,151 @@
+name: Scan Python code with Bandit
+description: >
+  Scans Python code for security problems with Bandit, PyCQA's static analyzer:
+  shell injection, unsafe deserialization, weak cryptography, hard-coded
+  passwords and the like. Bandit runs once with a JSON report, from which the
+  orb writes SARIF (for GitHub code scanning) and JUnit. Findings fail the step
+  unless report_only is true; a scan that didn't complete, a file Bandit
+  couldn't parse, or a scan of no files fails it either way. Bandit parses code
+  with its own Python, so install it with one at least as new as the code's
+  syntax. Run the install action (tools: bandit) first. The GitHub Actions twin
+  of the orb's bandit command.
+author: juburr
+
+inputs:
+  working_dir:
+    description: >
+      The directory to run in. targets, exclude and config are relative to it.
+    default: .
+  targets:
+    description: >
+      Files and directories to scan, recursively, separated by commas or spaces.
+      Each must exist.
+    default: .
+  exclude:
+    description: >
+      Paths to leave out, separated by commas or spaces, added to Bandit's own
+      (.svn, CVS, .bzr, .hg, .git, __pycache__, .tox, .eggs, *.egg) and to ./.venv,
+      ./venv and ./.nox when they exist. Bandit leaves out every path that contains
+      an entry, so .git also leaves out .github; name a directory as ./tests,
+      relative to the working directory, to leave out only it.
+    default: ""
+  severity_level:
+    description: >
+      The lowest severity Bandit reports. Everything reported is a finding.
+    default: low
+  confidence_level:
+    description: >
+      The lowest confidence Bandit reports. Everything reported is a finding.
+    default: low
+  tests:
+    description: >
+      Run only these Bandit tests, by ID, separated by commas or spaces, such as
+      B602,B608. Leave empty for every test.
+    default: ""
+  skip:
+    description: >
+      Bandit tests to skip, by ID, separated by commas or spaces, such as B101
+      (assert used).
+    default: ""
+  config:
+    description: >
+      A Bandit configuration file: YAML, or a TOML file with a [tool.bandit] table.
+      Leave empty to use pyproject.toml when it has a [tool.bandit] table, which
+      Bandit never reads by itself. .bandit files are not read, since they can
+      change Bandit's output.
+    default: ""
+  require_suppression_reasons:
+    description: >
+      Require a reason on every # nosec that suppressed a finding, written after a
+      second #, as in "# nosec B602 # the command is a constant". Bandit runs a
+      second time with --ignore-nosec to find the suppressed findings, which go in
+      the reports; one without a reason is a finding.
+    default: "false"
+  allow_empty:
+    description: >
+      Let a scan pass that found no Python files to scan. By default it fails, since
+      it checked nothing.
+    default: "false"
+  extra_args:
+    description: >
+      Further arguments for Bandit, such as --number 5. They are split like shell
+      words, but nothing in them is expanded or run. Options the command sets
+      itself, or that change what the report says, are refused.
+    default: ""
+  output_dir:
+    description: >
+      Absolute path of the directory to write the reports into.
+    default: /tmp/python-security-reports
+  report_name:
+    description: >
+      The reports' file name without its extension: <report_name>.json (Bandit's
+      report), <report_name>.sarif, and with require_suppression_reasons
+      <report_name>.suppressed.json. Letters, digits, '.', '_' and '-'.
+    default: bandit
+  junit:
+    description: >
+      Write the findings as JUnit (output_dir/junit/<report_name>.xml).
+    default: "true"
+  run_record:
+    description: >
+      Also write a run record (<report_name>.run-record.json): what was scanned,
+      with which Bandit and Python and settings, and what it found.
+    default: "false"
+  report_only:
+    description: >
+      Report findings without failing the step, to adopt the check gradually. A scan
+      that didn't complete, a file Bandit couldn't parse, or a scan of no files
+      still fails it.
+    default: "false"
+  store_artifacts:
+    description: >
+      Upload output_dir as a workflow artifact named
+      python-security-reports-<report_name>-<random>, including when the step fails.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Artifact names must be unique in a workflow run, and the same command
+    # can run in several jobs or matrix legs, so the name ends in a random
+    # suffix.
+    - name: Name the reports artifact
+      id: artifact
+      if: (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      shell: bash
+      env:
+        REPORT_NAME: ${{ inputs.report_name }}
+      run: |
+        if [[ ! "${REPORT_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            REPORT_NAME=reports
+        fi
+        printf 'name=python-security-reports-%s-%s\n' "${REPORT_NAME}" "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" >> "${GITHUB_OUTPUT}"
+    - name: Bandit
+      shell: bash
+      working-directory: ${{ inputs.working_dir }}
+      env:
+        PARAM_ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        PARAM_CONFIDENCE_LEVEL: ${{ inputs.confidence_level }}
+        PARAM_CONFIG: ${{ inputs.config }}
+        PARAM_EXCLUDE: ${{ inputs.exclude }}
+        PARAM_EXTRA_ARGS: ${{ inputs.extra_args }}
+        PARAM_JUNIT: ${{ inputs.junit }}
+        PARAM_OUTPUT_DIR: ${{ inputs.output_dir }}
+        PARAM_REPORT_NAME: ${{ inputs.report_name }}
+        PARAM_REPORT_ONLY: ${{ inputs.report_only }}
+        PARAM_REQUIRE_SUPPRESSION_REASONS: ${{ inputs.require_suppression_reasons }}
+        PARAM_RUN_RECORD: ${{ inputs.run_record }}
+        PARAM_SEVERITY_LEVEL: ${{ inputs.severity_level }}
+        PARAM_SKIP: ${{ inputs.skip }}
+        PARAM_TARGETS: ${{ inputs.targets }}
+        PARAM_TESTS: ${{ inputs.tests }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/bandit.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_PYTHON_SECURITY_PY=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.py"
+    - name: Upload the reports
+      if: always() && (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.artifact.outputs.name }}
+        path: ${{ inputs.output_dir }}
+        if-no-files-found: ignore

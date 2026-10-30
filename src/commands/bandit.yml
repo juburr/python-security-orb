@@ -1,0 +1,158 @@
+description: >
+  Scans Python code for security problems with Bandit, PyCQA's static
+  analyzer: shell injection, unsafe deserialization, weak cryptography,
+  hard-coded passwords and the like. Bandit runs once with a JSON report, from
+  which the orb writes SARIF (for GitHub code scanning) and JUnit. Findings
+  fail the step unless report_only is true; a scan that didn't complete, a
+  file Bandit couldn't parse, or a scan of no files fails it either way.
+  Bandit parses code with its own Python, so install it with one at least as
+  new as the code's syntax. Run install (tools: bandit) first.
+parameters:
+  working_dir:
+    type: string
+    default: "."
+    description: The directory to run in. targets, exclude and config are relative to it.
+  targets:
+    type: string
+    default: "."
+    description: >
+      Files and directories to scan, recursively, separated by commas or
+      spaces. Each must exist. Environment variables are expanded.
+  exclude:
+    type: string
+    default: ""
+    description: >
+      Paths to leave out, separated by commas or spaces, added to Bandit's own
+      (.svn, CVS, .bzr, .hg, .git, __pycache__, .tox, .eggs, *.egg) and to
+      ./.venv, ./venv and ./.nox when they exist. Bandit leaves out every path
+      that contains an entry, so .git also leaves out .github; name a
+      directory as ./tests, relative to the working directory, to leave out
+      only it. Environment variables are expanded.
+  severity_level:
+    type: enum
+    enum: ["low", "medium", "high"]
+    default: low
+    description: The lowest severity Bandit reports. Everything reported is a finding.
+  confidence_level:
+    type: enum
+    enum: ["low", "medium", "high"]
+    default: low
+    description: The lowest confidence Bandit reports. Everything reported is a finding.
+  tests:
+    type: string
+    default: ""
+    description: >
+      Run only these Bandit tests, by ID, separated by commas or spaces, such
+      as B602,B608. Leave empty for every test. Environment variables are
+      expanded.
+  skip:
+    type: string
+    default: ""
+    description: >
+      Bandit tests to skip, by ID, separated by commas or spaces, such as
+      B101 (assert used). Environment variables are expanded.
+  config:
+    type: string
+    default: ""
+    description: >
+      A Bandit configuration file: YAML, or a TOML file with a [tool.bandit]
+      table. Leave empty to use pyproject.toml when it has a [tool.bandit]
+      table, which Bandit never reads by itself. .bandit files are not read,
+      since they can change Bandit's output. Environment variables are
+      expanded.
+  require_suppression_reasons:
+    type: boolean
+    default: false
+    description: >
+      Require a reason on every # nosec that suppressed a finding, written
+      after a second #, as in "# nosec B602 # the command is a constant".
+      Bandit runs a second time with --ignore-nosec to find the suppressed
+      findings, which go in the reports; one without a reason is a finding.
+  allow_empty:
+    type: boolean
+    default: false
+    description: >
+      Let a scan pass that found no Python files to scan. By default it fails,
+      since it checked nothing.
+  extra_args:
+    type: string
+    default: ""
+    description: >
+      Further arguments for Bandit, such as --number 5. They are split like
+      shell words, but nothing in them is expanded or run. Options the
+      command sets itself, or that change what the report says, are refused.
+      Environment variables are expanded.
+  output_dir:
+    type: string
+    default: /tmp/python-security-reports
+    description: >
+      Absolute path of the directory to write the reports into. Environment
+      variables are not expanded, since the path is also passed to
+      store_artifacts and store_test_results.
+  report_name:
+    type: string
+    default: bandit
+    description: >
+      The reports' file name without its extension: <report_name>.json
+      (Bandit's report), <report_name>.sarif, and with
+      require_suppression_reasons <report_name>.suppressed.json. Letters,
+      digits, '.', '_' and '-'.
+  junit:
+    type: boolean
+    default: true
+    description: >
+      Write the findings as JUnit (output_dir/junit/<report_name>.xml), and
+      store it with store_test_results for CircleCI's Tests tab.
+  run_record:
+    type: boolean
+    default: false
+    description: >
+      Also write a run record (<report_name>.run-record.json): what was
+      scanned, with which Bandit and Python and settings, and what it found.
+  report_only:
+    type: boolean
+    default: false
+    description: >
+      Report findings without failing the step, to adopt the check gradually.
+      A scan that didn't complete, a file Bandit couldn't parse, or a scan of
+      no files still fails it.
+  store_artifacts:
+    type: boolean
+    default: true
+    description: Store output_dir as job artifacts under python-security-reports/, including when the step fails.
+steps:
+  - run:
+      name: Bandit (<< parameters.report_name >>)
+      working_directory: << parameters.working_dir >>
+      environment:
+        PARAM_ALLOW_EMPTY: << parameters.allow_empty >>
+        PARAM_CONFIDENCE_LEVEL: << parameters.confidence_level >>
+        PARAM_CONFIG: << parameters.config >>
+        PARAM_EXCLUDE: << parameters.exclude >>
+        PARAM_EXTRA_ARGS: << parameters.extra_args >>
+        PARAM_JUNIT: << parameters.junit >>
+        PARAM_OUTPUT_DIR: << parameters.output_dir >>
+        PARAM_REPORT_NAME: << parameters.report_name >>
+        PARAM_REPORT_ONLY: << parameters.report_only >>
+        PARAM_REQUIRE_SUPPRESSION_REASONS: << parameters.require_suppression_reasons >>
+        PARAM_RUN_RECORD: << parameters.run_record >>
+        PARAM_SEVERITY_LEVEL: << parameters.severity_level >>
+        PARAM_SKIP: << parameters.skip >>
+        PARAM_TARGETS: << parameters.targets >>
+        PARAM_TESTS: << parameters.tests >>
+        SCRIPT_PYTHON_SECURITY_LIB: << include(scripts/lib/python_security.sh) >>
+        SCRIPT_PYTHON_SECURITY_PY: << include(scripts/lib/python_security.py) >>
+      command: << include(scripts/bandit.sh) >>
+  - when:
+      condition: << parameters.junit >>
+      steps:
+        - store_test_results:
+            path: << parameters.output_dir >>/junit/<< parameters.report_name >>.xml
+            when: always
+  - when:
+      condition: << parameters.store_artifacts >>
+      steps:
+        - store_artifacts:
+            path: << parameters.output_dir >>
+            destination: python-security-reports
+            when: always

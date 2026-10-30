@@ -1,0 +1,134 @@
+name: Check Python package licenses
+description: >
+  Lists the license of every package installed in a Python environment with
+  pip-licenses, and checks each against allowed_licenses. A license is read as
+  an SPDX expression from clarify, then the package's License-Expression, its
+  License field when that names a license, then its license classifiers; a
+  package whose metadata names no license exactly counts as not allowed. Writes
+  the inventory as JSON (<report_name>.json and pip-licenses' own
+  <report_name>.pip-licenses.json), CSV and JUnit. Packages that aren't allowed
+  fail the step unless report_only is true; pip-licenses failing, or leaving out
+  a package the environment has, and an environment with nothing to check fail
+  it either way. Run the install action (tools: pip-licenses) first, and install
+  the project's dependencies into the environment. The GitHub Actions twin of
+  the orb's licenses command.
+author: juburr
+
+inputs:
+  working_dir:
+    description: >
+      The directory to run in: environment is relative to it, and the project named
+      in its pyproject.toml is the project check_project refers to.
+    default: .
+  environment:
+    description: >
+      The installed environment to check, as its Python interpreter, such as
+      .venv/bin/python, or its directory, such as .venv. Empty checks .venv in
+      working_dir. Every distribution the interpreter sees is listed, installers
+      such as pip included.
+    default: ""
+  allowed_licenses:
+    description: >
+      The licenses packages may have, as SPDX identifiers separated by commas or
+      spaces, such as Apache-2.0,MIT,MPL-2.0 (certifi, which requests needs, is
+      MPL-2.0). An expression with OR needs one allowed side, with AND every part; a
+      license with an exception (WITH) needs its license allowed. Identifiers that
+      aren't SPDX, such as BSD, can be listed as a package's metadata writes them.
+      Matching ignores case.
+    default: "Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,PSF-2.0"
+  ignore:
+    description: >
+      Packages whose license isn't checked, separated by commas or spaces, as a name
+      or name==version, such as your organization's own packages. They stay in the
+      inventory.
+    default: ""
+  clarify:
+    description: >
+      Licenses to use in place of what packages' metadata says, one
+      name[==version]=EXPRESSION per line, such as idna==2.7=BSD-3-Clause: for a
+      package whose metadata names no license exactly, such as one with only the
+      "BSD License" classifier. Lines starting with # are comments.
+    default: ""
+  check_project:
+    description: >
+      Also check the license of the project itself, the package that working_dir's
+      pyproject.toml names, when it is installed. It is always in the inventory.
+    default: "false"
+  allow_empty:
+    description: >
+      Let a check pass that found no package to check. By default it fails, since it
+      checked nothing.
+    default: "false"
+  output_dir:
+    description: >
+      Absolute path of the directory to write the reports into.
+    default: /tmp/python-security-reports
+  report_name:
+    description: >
+      The reports' file name without its extension: <report_name>.json (the orb's
+      inventory and verdict), <report_name>.pip-licenses.json (pip-licenses' own)
+      and <report_name>.csv. Letters, digits, '.', '_' and '-'.
+    default: licenses
+  junit:
+    description: >
+      Write the check as JUnit (output_dir/junit/<report_name>.xml), one case per
+      package.
+    default: "true"
+  run_record:
+    description: >
+      Also write a run record (<report_name>.run-record.json): which environment was
+      checked, with which pip-licenses, and what it found.
+    default: "false"
+  report_only:
+    description: >
+      Report packages that aren't allowed without failing the step, to adopt the
+      check gradually. pip-licenses failing, or a check of nothing, still fails it.
+    default: "false"
+  store_artifacts:
+    description: >
+      Upload output_dir as a workflow artifact named
+      python-security-reports-<report_name>-<random>, including when the step fails.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Artifact names must be unique in a workflow run, and the same command
+    # can run in several jobs or matrix legs, so the name ends in a random
+    # suffix.
+    - name: Name the reports artifact
+      id: artifact
+      if: (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      shell: bash
+      env:
+        REPORT_NAME: ${{ inputs.report_name }}
+      run: |
+        if [[ ! "${REPORT_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            REPORT_NAME=reports
+        fi
+        printf 'name=python-security-reports-%s-%s\n' "${REPORT_NAME}" "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" >> "${GITHUB_OUTPUT}"
+    - name: pip-licenses
+      shell: bash
+      working-directory: ${{ inputs.working_dir }}
+      env:
+        PARAM_ALLOWED_LICENSES: ${{ inputs.allowed_licenses }}
+        PARAM_ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        PARAM_CHECK_PROJECT: ${{ inputs.check_project }}
+        PARAM_CLARIFY: ${{ inputs.clarify }}
+        PARAM_ENVIRONMENT: ${{ inputs.environment }}
+        PARAM_IGNORE: ${{ inputs.ignore }}
+        PARAM_JUNIT: ${{ inputs.junit }}
+        PARAM_OUTPUT_DIR: ${{ inputs.output_dir }}
+        PARAM_REPORT_NAME: ${{ inputs.report_name }}
+        PARAM_REPORT_ONLY: ${{ inputs.report_only }}
+        PARAM_RUN_RECORD: ${{ inputs.run_record }}
+      run: >-
+        bash "${GITHUB_ACTION_PATH}/../run_script.sh" "${GITHUB_ACTION_PATH}/../../src/scripts/licenses.sh"
+        "SCRIPT_PYTHON_SECURITY_LIB=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.sh" "SCRIPT_PYTHON_SECURITY_PY=${GITHUB_ACTION_PATH}/../../src/scripts/lib/python_security.py"
+    - name: Upload the reports
+      if: always() && (inputs.store_artifacts == 'true' || inputs.store_artifacts == '1')
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.artifact.outputs.name }}
+        path: ${{ inputs.output_dir }}
+        if-no-files-found: ignore
