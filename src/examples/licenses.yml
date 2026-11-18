@@ -10,7 +10,7 @@ description: >
 usage:
   version: 2.1
   orbs:
-    python-security: juburr/python-security-orb@0.1.0
+    python-security: juburr/python-security-orb@0.2.0
   jobs:
     licenses:
       docker:

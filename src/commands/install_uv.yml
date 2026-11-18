@@ -19,11 +19,14 @@ parameters:
       Base URL of an internal mirror of GitHub releases, such as an
       Artifactory or Nexus remote repository, to download from instead of
       https://github.com (and Astral's own copy at releases.astral.sh). It
-      replaces https://github.com in the release URL, so the mirror must
-      serve the same path. It must be an https:// URL, without credentials
+      replaces https://github.com in the release URL, so the mirror must serve
+      the same path. It must be an https:// URL, without credentials
       (user:password@) or a query or fragment, which would show in the log.
-      What is downloaded is still verified against this orb's checksum
-      table. Environment variables are expanded.
+      What is downloaded is still verified against this orb's checksum table.
+      A mirror that needs a login gets it from the entry for its host in the
+      .netrc file (NETRC, or ~/.netrc), and curl sends it to the mirror alone,
+      never to a host the mirror redirects to. Environment variables are
+      expanded.
   install_path:
     type: string
     default: ""
