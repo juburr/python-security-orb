@@ -21,6 +21,17 @@ fixture_checks() {
     check "the mirror URL is the release URL with the mirror in place of ${FIXTURE_ORIGIN}" \
         test "${mirror_url#"${mirror}"}" = "$(url "${LISTED}" "${DEFAULT_ARCH}" | sed "s|^${FIXTURE_ORIGIN}||")"
     new_case
+    printf 'machine github.com login gh password gh-token\nmachine mirror.example login ci password s3cret\n' > "${CASE}/home/.netrc"
+    chmod 600 "${CASE}/home/.netrc"
+    run_install "PARAM_DOWNLOAD_BASE_URL=${mirror}/"
+    check "a mirror that needs a login gets the .netrc entry for its host" \
+        grep -qF "netrc=600:machine mirror.example login ci password s3cret  location-trusted=no-and-follows" \
+        "${CASE}/downloads.log.login"
+    check "and no download from anywhere else gets one" \
+        test -z "$(awk -v m="${mirror}/" 'index($1, m) != 1 && $2 != "netrc=none"' "${CASE}/downloads.log.login")"
+    check "and installs" installed
+    check "without showing the login" not_said "s3cret"
+    new_case
     run_install "PARAM_DOWNLOAD_BASE_URL=${mirror}/"
     check "installs from the mirror" installed
     check "downloads from the mirror alone" downloaded "${mirror_url}"

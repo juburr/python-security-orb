@@ -57,7 +57,10 @@ parameters:
       Base URL of an internal mirror of GitHub releases to download uv from
       instead of https://github.com, such as an Artifactory or Nexus remote
       repository: an https:// URL, without credentials or a query or fragment.
-      Environment variables are expanded.
+      A mirror that needs a login gets it from the entry for its host in the
+      .netrc file (NETRC, or ~/.netrc), and curl sends it to the mirror alone,
+      never to a host the mirror redirects to. Environment variables are
+      expanded.
   uv_version:
     type: string
     default: "0.13.6"
